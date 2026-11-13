@@ -1,0 +1,6 @@
+{
+  "name": "LLM Multi-Tester & Benchmark Workbench",
+  "description": "High-performance developer workbench for benchmarking, streaming, and comparing Large Language Models across OpenAI-compatible APIs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

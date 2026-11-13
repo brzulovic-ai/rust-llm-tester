@@ -1,0 +1,164 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root,
+  [data-theme="light"] {
+    --bg-canvas: #f8fafc;
+    --bg-surface: #ffffff;
+    --bg-elevated: #f1f5f9;
+    --bg-hover: #e2e8f0;
+    --border-subtle: #e2e8f0;
+    --border-strong: #cbd5e1;
+    --text-primary: #0f172a;
+    --text-secondary: #475569;
+    --text-muted: #64748b;
+    --accent-primary: #2563eb;
+    --accent-hover: #1d4ed8;
+    --accent-contrast: #ffffff;
+    --accent-soft: rgba(37, 99, 235, 0.1);
+    --status-success: #16a34a;
+    --status-warning: #d97706;
+    --status-error: #dc2626;
+    --diff-add-bg: rgba(22, 163, 74, 0.14);
+    --diff-add-text: #15803d;
+    --diff-del-bg: rgba(220, 38, 38, 0.14);
+    --diff-del-text: #b91c1c;
+    --code-bg: #f1f5f9;
+  }
+
+  [data-theme="dark"] {
+    --bg-canvas: #0b0f17;
+    --bg-surface: #111827;
+    --bg-elevated: #1e293b;
+    --bg-hover: #283548;
+    --border-subtle: #1e293b;
+    --border-strong: #334155;
+    --text-primary: #f1f5f9;
+    --text-secondary: #cbd5e1;
+    --text-muted: #94a3b8;
+    --accent-primary: #3b82f6;
+    --accent-hover: #60a5fa;
+    --accent-contrast: #ffffff;
+    --accent-soft: rgba(59, 130, 246, 0.15);
+    --status-success: #22c55e;
+    --status-warning: #f59e0b;
+    --status-error: #ef4444;
+    --diff-add-bg: rgba(34, 197, 94, 0.18);
+    --diff-add-text: #86efac;
+    --diff-del-bg: rgba(239, 68, 68, 0.18);
+    --diff-del-text: #fca5a5;
+    --code-bg: #0f172a;
+  }
+
+  [data-theme="sepia-light"] {
+    --bg-canvas: #f5efe4;
+    --bg-surface: #fbf7ef;
+    --bg-elevated: #ede4d3;
+    --bg-hover: #e3d7c1;
+    --border-subtle: #dfd3bd;
+    --border-strong: #c8b89b;
+    --text-primary: #2c221e;
+    --text-secondary: #5a473e;
+    --text-muted: #7a655a;
+    --accent-primary: #b45309;
+    --accent-hover: #92400e;
+    --accent-contrast: #ffffff;
+    --accent-soft: rgba(180, 83, 9, 0.12);
+    --status-success: #15803d;
+    --status-warning: #b45309;
+    --status-error: #b91c1c;
+    --diff-add-bg: rgba(21, 128, 61, 0.14);
+    --diff-add-text: #166534;
+    --diff-del-bg: rgba(185, 28, 28, 0.14);
+    --diff-del-text: #991b1b;
+    --code-bg: #efe6d5;
+  }
+
+  [data-theme="sepia-dark"] {
+    --bg-canvas: #171310;
+    --bg-surface: #211b17;
+    --bg-elevated: #2d251f;
+    --bg-hover: #3a3029;
+    --border-subtle: #322922;
+    --border-strong: #4a3d33;
+    --text-primary: #efe6d8;
+    --text-secondary: #cfc0ad;
+    --text-muted: #a69581;
+    --accent-primary: #d97706;
+    --accent-hover: #f59e0b;
+    --accent-contrast: #171310;
+    --accent-soft: rgba(217, 119, 6, 0.18);
+    --status-success: #4ade80;
+    --status-warning: #fbbf24;
+    --status-error: #f87171;
+    --diff-add-bg: rgba(74, 222, 128, 0.16);
+    --diff-add-text: #86efac;
+    --diff-del-bg: rgba(248, 113, 113, 0.16);
+    --diff-del-text: #fca5a5;
+    --code-bg: #1a1512;
+  }
+
+  [data-theme="greenish-sepia"] {
+    --bg-canvas: #e9efe4;
+    --bg-surface: #f2f6ee;
+    --bg-elevated: #dce5d5;
+    --bg-hover: #cfdaca;
+    --border-subtle: #ccd6c4;
+    --border-strong: #b0bea6;
+    --text-primary: #1a281d;
+    --text-secondary: #3c4f40;
+    --text-muted: #5a6f5e;
+    --accent-primary: #15803d;
+    --accent-hover: #166534;
+    --accent-contrast: #ffffff;
+    --accent-soft: rgba(21, 128, 61, 0.12);
+    --status-success: #15803d;
+    --status-warning: #a16207;
+    --status-error: #b91c1c;
+    --diff-add-bg: rgba(21, 128, 61, 0.14);
+    --diff-add-text: #14532d;
+    --diff-del-bg: rgba(185, 28, 28, 0.14);
+    --diff-del-text: #991b1b;
+    --code-bg: #e1ead9;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    background-color: var(--bg-canvas);
+    color: var(--text-primary);
+    font-family: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1,
+  h2,
+  h3,
+  .font-display {
+    font-family: "Outfit", -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+
+  code,
+  pre,
+  .font-mono {
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

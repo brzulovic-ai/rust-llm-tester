@@ -1,0 +1,77 @@
+# BenchForge Rust TUI Configuration
+# Resolution order:
+#   1. --config <path>
+#   2. ./benchforge.toml
+#   3. ~/.config/benchforge/config.toml
+#   4. Built-in defaults
+
+[execution]
+mode = "parallel"        # "parallel" | "sequential"
+concurrency = 3          # 1..=10 worker threads
+timeout_sec = 300        # Per-request timeout in seconds
+stream = true            # Enable SSE streaming
+temperature = 0.7
+max_tokens = 2048
+top_p = 1.0
+# seed = 42
+
+[system_prompt]
+enabled = false
+persona = "concise-expert"   # "concise-expert" | "deep-analyst" | "code-architect"
+target_mode = "all"          # "all" | "specific"
+target_models = []
+content = ""
+
+[ui]
+theme = "dark"               # "light" | "dark" | "sepia-light" | "sepia-dark" | "greenish-sepia"
+history_limit = 50
+
+[supabase]
+url = ""
+anon_key_env = "SUPABASE_ANON_KEY"
+table_name = "benchmark_runs"
+auto_sync = false
+
+[[providers]]
+id = "ollama-local"
+name = "Ollama Local"
+kind = "ollama"
+base_url = "http://localhost:11434/v1"
+api_key_env = ""
+models = ["llama3.2:latest", "qwen2.5-coder:7b"]
+
+[[providers]]
+id = "openai"
+name = "OpenAI API"
+kind = "openai"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+models = ["gpt-4o-mini", "gpt-4.1-mini"]
+
+[[providers]]
+id = "groq"
+name = "Groq Cloud"
+kind = "groq"
+base_url = "https://api.groq.com/openai/v1"
+api_key_env = "GROQ_API_KEY"
+models = ["llama-3.3-70b-versatile"]
+
+[[providers]]
+id = "lmstudio"
+name = "LM Studio"
+kind = "lmstudio"
+base_url = "http://localhost:1234/v1"
+api_key_env = ""
+models = ["local-model"]
+
+[[targets]]
+id = "target-ollama-llama"
+provider_id = "ollama-local"
+model = "llama3.2:latest"
+enabled = true
+
+[[targets]]
+id = "target-groq-llama"
+provider_id = "groq"
+model = "llama-3.3-70b-versatile"
+enabled = true
