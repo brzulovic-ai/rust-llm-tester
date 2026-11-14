@@ -523,6 +523,120 @@ impl BenchConfig {
     pub fn enabled_targets(&self) -> Vec<&TargetConfig> {
         self.targets.iter().filter(|t| t.enabled).collect()
     }
+
+    pub fn provider_target_counts(&self, provider_id: &str) -> (usize, usize) {
+        let mut enabled = 0usize;
+        let mut total = 0usize;
+        for t in &self.targets {
+            if t.provider_id == provider_id {
+                total += 1;
+                if t.enabled {
+                    enabled += 1;
+                }
+            }
+        }
+        (enabled, total)
+    }
+
+    /// Rapidly enables all models for a provider if none or only some are active;
+    /// disables all of its models if all are currently active.
+    pub fn toggle_provider_targets(&mut self, provider_id: &str) -> (bool, usize) {
+        let (enabled, total) = self.provider_target_counts(provider_id);
+        if total == 0 {
+            if let Some(provider) = self.providers.iter().find(|p| p.id == provider_id).cloned() {
+                for model in &provider.models {
+                    let id = sanitize_target_id(provider_id, model);
+                    self.targets.push(TargetConfig {
+                        id,
+                        provider_id: provider_id.to_string(),
+                        model: model.clone(),
+                        enabled: true,
+                        system_prompt_override: None,
+                    });
+                }
+                return (true, provider.models.len());
+            }
+            return (false, 0);
+        }
+
+        let next_state = enabled < total;
+        let mut count = 0usize;
+        for t in &mut self.targets {
+            if t.provider_id == provider_id {
+                t.enabled = next_state;
+                count += 1;
+            }
+        }
+        (next_state, count)
+    }
+
+    /// Aggregates discovered models into `provider.models` and `self.targets`,
+    /// deduplicating existing entries and returning `(added_to_provider, added_to_targets)`.
+    pub fn aggregate_provider_models(
+        &mut self,
+        provider_id: &str,
+        discovered: &[String],
+    ) -> (usize, usize) {
+        let mut added_provider = 0usize;
+        let mut added_targets = 0usize;
+
+        if let Some(provider) = self.providers.iter_mut().find(|p| p.id == provider_id) {
+            for model in discovered {
+                let clean = model.trim();
+                if clean.is_empty() {
+                    continue;
+                }
+                if !provider.models.iter().any(|m| m == clean) {
+                    provider.models.push(clean.to_string());
+                    added_provider += 1;
+                }
+            }
+        }
+
+        for model in discovered {
+            let clean = model.trim();
+            if clean.is_empty() {
+                continue;
+            }
+            let exists = self
+                .targets
+                .iter()
+                .any(|t| t.provider_id == provider_id && t.model == clean);
+            if !exists {
+                let mut candidate_id = sanitize_target_id(provider_id, clean);
+                let mut suffix = 2usize;
+                while self.targets.iter().any(|t| t.id == candidate_id) {
+                    candidate_id = format!("{}-{}", sanitize_target_id(provider_id, clean), suffix);
+                    suffix += 1;
+                }
+                self.targets.push(TargetConfig {
+                    id: candidate_id,
+                    provider_id: provider_id.to_string(),
+                    model: clean.to_string(),
+                    enabled: false,
+                    system_prompt_override: None,
+                });
+                added_targets += 1;
+            }
+        }
+
+        (added_provider, added_targets)
+    }
+}
+
+fn sanitize_target_id(provider_id: &str, model: &str) -> String {
+    let clean_model: String = model
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = clean_model.trim_matches('-');
+    format!("target-{}-{}", provider_id, trimmed)
 }
 
 #[cfg(test)]
@@ -588,5 +702,32 @@ mod tests {
         assert!(groq.models.contains(&"llama-3.3-70b-versatile".to_string()));
         assert!(groq.models.contains(&"llama-3.1-8b-instant".to_string()));
         assert!(groq.models.contains(&"qwen/qwen3-32b".to_string()));
+    }
+
+    #[test]
+    fn aggregates_discovered_models_and_toggles_provider_targets() {
+        let mut cfg = BenchConfig::default();
+        let (added_p, added_t) = cfg.aggregate_provider_models(
+            "groq",
+            &[
+                "llama-3.3-70b-versatile".to_string(),
+                "deepseek-r1-distill-llama-70b".to_string(),
+            ],
+        );
+        assert_eq!(added_p, 1);
+        assert_eq!(added_t, 1);
+
+        let (enabled_before, total) = cfg.provider_target_counts("groq");
+        assert_eq!(enabled_before, 0);
+        assert!(total >= 4);
+
+        let (new_state, affected) = cfg.toggle_provider_targets("groq");
+        assert!(new_state);
+        assert_eq!(affected, total);
+        assert_eq!(cfg.provider_target_counts("groq").0, total);
+
+        let (off_state, _) = cfg.toggle_provider_targets("groq");
+        assert!(!off_state);
+        assert_eq!(cfg.provider_target_counts("groq").0, 0);
     }
 }

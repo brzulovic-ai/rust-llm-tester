@@ -245,7 +245,25 @@ export const RustTuiModal: React.FC<RustTuiModalProps> = ({
                       System Prompt [p]: {String(systemPrompt.enabled)} · Persona [P]: {systemPrompt.personaId ?? 'none'}
                     </div>
                     <div className="pt-1" style={{ color: 'var(--text-muted)' }}>
-                      Target Models (Space to Toggle, s to Save):
+                      Target Providers (Space: Toggle All · d: Refresh · D: All):
+                    </div>
+                    {providers.map((p) => {
+                      const pTargets = targets.filter((t) => t.providerId === p.id);
+                      const enabledCount = pTargets.filter((t) => t.enabled).length;
+                      const mark =
+                        pTargets.length > 0 && enabledCount === pTargets.length
+                          ? '[x]'
+                          : enabledCount > 0
+                            ? '[~]'
+                            : '[ ]';
+                      return (
+                        <div key={p.id}>
+                          {mark} {p.name} ({enabledCount}/{pTargets.length})
+                        </div>
+                      );
+                    })}
+                    <div className="pt-1" style={{ color: 'var(--text-muted)' }}>
+                      Target Models (←/→ Focus · Space Toggle · s Save):
                     </div>
                     {targets.map((t) => (
                       <div key={t.id}>

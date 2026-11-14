@@ -1,4 +1,4 @@
-use crate::app::{ActiveTab, AppState};
+use crate::app::{ActiveTab, AppState, ConfigFocus};
 use crate::config::{ExecutionMode, ThemeId};
 use crate::diff::{compute_token_diff, DiffOp};
 use crate::engine::RunStatus;
@@ -147,7 +147,7 @@ fn draw_footer(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect
     let key_hints = match app.active_tab {
         ActiveTab::PromptSuites if app.editing_prompt => "EDIT MODE: Type prompt · Esc Exit Edit",
         ActiveTab::PromptSuites => "i Edit Prompt · Enter Load Suite · r Run · t Theme · q Quit",
-        ActiveTab::ConfigEditor => "Space Toggle Model · m Mode · +/- Threads · [/] Timeout · p SysPrompt · s Save · q Quit",
+        ActiveTab::ConfigEditor => "←/→ Providers/Models · Space Toggle · d Refresh · D Refresh All · m Mode · +/- Threads · s Save",
         ActiveTab::DiffCompare => "a Cycle Baseline · b Cycle Candidate · r Run · e Export · q Quit",
         _ => "1-6 Tabs · r Run · R Bulk Retry · x Abort · s Save Config · e Export · t Theme · q Quit",
     };
@@ -546,14 +546,71 @@ fn draw_config_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: 
     );
     frame.render_widget(settings_panel, cols[0]);
 
-    // Right: Interactive Targets Toggle List
+    // Right: Split vertically into Target Providers (top) & Target Models (bottom)
+    let right_panes = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
+        .split(cols[1]);
+
+    let providers_focused = app.config_focus == ConfigFocus::Providers;
+    let provider_items: Vec<ListItem> = app
+        .config
+        .providers
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let sel = providers_focused && i == app.selected_provider_idx;
+            let (enabled, total) = app.config.provider_target_counts(&p.id);
+            let mark = if total > 0 && enabled == total {
+                "[x]"
+            } else if enabled > 0 {
+                "[~]"
+            } else {
+                "[ ]"
+            };
+            let is_refreshing = app.refreshing_providers.contains(&p.id);
+            let style = if sel {
+                Style::default().fg(pal.accent).add_modifier(Modifier::BOLD)
+            } else if enabled > 0 {
+                Style::default().fg(pal.text)
+            } else {
+                Style::default().fg(pal.muted)
+            };
+            let mut spans = vec![
+                Span::styled(if sel { "> " } else { "  " }, style),
+                Span::styled(format!("{} {} ", mark, p.name), style),
+                Span::styled(
+                    format!("({}/{})", enabled, total),
+                    Style::default().fg(pal.muted),
+                ),
+            ];
+            if is_refreshing {
+                spans.push(Span::styled(
+                    " [refreshing...]",
+                    Style::default().fg(pal.warning),
+                ));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+
+    let providers_list = List::new(provider_items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Target Providers (Space: Toggle All · d: Refresh · D: All) ")
+            .border_style(Style::default().fg(if providers_focused { pal.accent } else { pal.muted }))
+            .style(Style::default().bg(pal.surface).fg(pal.text)),
+    );
+    frame.render_widget(providers_list, right_panes[0]);
+
+    let models_focused = app.config_focus == ConfigFocus::Models;
     let target_items: Vec<ListItem> = app
         .config
         .targets
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let sel = i == app.selected_config_idx;
+            let sel = models_focused && i == app.selected_config_idx;
             let mark = if t.enabled { "[x]" } else { "[ ]" };
             let style = if sel {
                 Style::default().fg(pal.accent).add_modifier(Modifier::BOLD)
@@ -573,8 +630,9 @@ fn draw_config_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: 
     let targets_list = List::new(target_items).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Target Models (Space/Enter to Toggle, s to Save TOML) ")
+            .title(" Target Models (Space/Enter: Toggle · s: Save TOML) ")
+            .border_style(Style::default().fg(if models_focused { pal.accent } else { pal.muted }))
             .style(Style::default().bg(pal.surface).fg(pal.text)),
     );
-    frame.render_widget(targets_list, cols[1]);
+    frame.render_widget(targets_list, right_panes[1]);
 }

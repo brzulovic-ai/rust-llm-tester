@@ -15,7 +15,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use engine::{spawn_benchmark_batch, EngineEvent};
+use engine::{discover_provider_models, spawn_benchmark_batch, EngineEvent};
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::path::PathBuf;
@@ -64,6 +64,8 @@ enum ConfigAction {
     Validate,
     /// Print the effective merged configuration as TOML
     Show,
+    /// Discover models from each provider endpoint and aggregate into TOML
+    Refresh,
 }
 
 #[tokio::main]
@@ -118,6 +120,34 @@ async fn handle_subcommand(cmd: Commands, explicit_cfg: Option<&std::path::Path>
                     println!("{}", toml::to_string_pretty(&loaded.config)?);
                     Ok(())
                 }
+                ConfigAction::Refresh => {
+                    let mut cfg = loaded.config;
+                    let providers = cfg.providers.clone();
+                    let mut total_added_targets = 0usize;
+                    for p in &providers {
+                        match discover_provider_models(p).await {
+                            Ok(models) => {
+                                let (added_p, added_t) =
+                                    cfg.aggregate_provider_models(&p.id, &models);
+                                total_added_targets += added_t;
+                                println!(
+                                    "  [OK] {} ({}): {} discovered (+{} provider, +{} targets)",
+                                    p.name, p.base_url, models.len(), added_p, added_t
+                                );
+                            }
+                            Err(err) => {
+                                println!("  [ERR] {} ({}): {}", p.name, p.base_url, err);
+                            }
+                        }
+                    }
+                    cfg.save_to_path(&loaded.source_path)?;
+                    println!(
+                        "Saved {} (+{} new targets aggregated)",
+                        loaded.source_path.display(),
+                        total_added_targets
+                    );
+                    Ok(())
+                }
             }
         }
         Commands::Run { prompt, json } => {
@@ -133,6 +163,7 @@ async fn handle_subcommand(cmd: Commands, explicit_cfg: Option<&std::path::Path>
                     EngineEvent::Update(res) => {
                         map.insert(res.target_id.clone(), res);
                     }
+                    EngineEvent::ModelsRefreshed { .. } => {}
                     EngineEvent::BatchFinished => break,
                 }
             }

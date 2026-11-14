@@ -1,5 +1,5 @@
 .PHONY: help web-install web-dev web-build web-start web-test web-lint \
-	tui-init tui-validate tui-build tui-run tui-test tui-clippy tui-fmt \
+	tui-init tui-validate tui-refresh tui-build tui-run tui-test tui-clippy tui-fmt \
 	up up-litellm down logs tui-docker build-images check clean
 
 RUST_DIR := rust-tui
@@ -19,6 +19,7 @@ help:
 	@echo "Rust TUI (benchforge-tui):"
 	@echo "  make tui-init      Scaffold ./benchforge.toml from defaults"
 	@echo "  make tui-validate  Validate config & API key environment variables"
+	@echo "  make tui-refresh   Discover provider models and aggregate into TOML"
 	@echo "  make tui-build     Build release binary in rust-tui/target/release"
 	@echo "  make tui-run       Launch interactive Rust TUI"
 	@echo "  make tui-test      Run Cargo unit tests"
@@ -57,6 +58,9 @@ tui-init:
 
 tui-validate:
 	cd $(RUST_DIR) && cargo run -- --config ../$(CONFIG_FILE) config validate
+
+tui-refresh:
+	cd $(RUST_DIR) && cargo run -- --config ../$(CONFIG_FILE) config refresh
 
 tui-build:
 	cd $(RUST_DIR) && cargo build --release

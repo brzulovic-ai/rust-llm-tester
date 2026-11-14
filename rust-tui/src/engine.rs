@@ -66,6 +66,11 @@ pub struct ModelRunResult {
 pub enum EngineEvent {
     Update(ModelRunResult),
     BatchFinished,
+    ModelsRefreshed {
+        provider_id: String,
+        provider_name: String,
+        result: Result<Vec<String>, String>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -157,6 +162,91 @@ pub fn build_advice(status: Option<u16>, err_text: &str, base_url: &str) -> Stri
         Some(429) => "Rate limited (429). Lower execution.concurrency or retry.".to_string(),
         _ => "Inspect provider base_url, model name, and network connectivity.".to_string(),
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelsListResponse {
+    data: Option<Vec<ModelEntry>>,
+    models: Option<Vec<ModelEntry>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelEntry {
+    id: Option<String>,
+    name: Option<String>,
+}
+
+pub async fn discover_provider_models(provider: &ProviderConfig) -> Result<Vec<String>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    if let Some(key) = provider.resolve_api_key() {
+        if let Ok(val) = HeaderValue::from_str(&format!("Bearer {}", key)) {
+            headers.insert(AUTHORIZATION, val);
+        }
+    }
+    for (k, v) in &provider.custom_headers {
+        if let (Ok(name), Ok(val)) = (
+            HeaderName::from_bytes(k.as_bytes()),
+            HeaderValue::from_str(v),
+        ) {
+            headers.insert(name, val);
+        }
+    }
+
+    let url = format!("{}/models", provider.base_url.trim_end_matches('/'));
+    let resp = client
+        .get(&url)
+        .headers(headers)
+        .send()
+        .await
+        .map_err(|e| format!("Network error calling {}: {}", url, e))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "HTTP {} from {}: {}",
+            status.as_u16(),
+            url,
+            body.chars().take(180).collect::<String>()
+        ));
+    }
+
+    let parsed = resp
+        .json::<ModelsListResponse>()
+        .await
+        .map_err(|e| format!("Invalid /models JSON from {}: {}", url, e))?;
+
+    let mut out = Vec::new();
+    for entry in parsed.data.unwrap_or_default().into_iter().chain(parsed.models.unwrap_or_default()) {
+        if let Some(id) = entry.id.or(entry.name) {
+            let trimmed = id.trim().to_string();
+            if !trimmed.is_empty() && !out.contains(&trimmed) {
+                out.push(trimmed);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+pub fn spawn_refresh_provider_models(
+    provider: ProviderConfig,
+    tx: mpsc::UnboundedSender<EngineEvent>,
+) {
+    tokio::spawn(async move {
+        let result = discover_provider_models(&provider).await;
+        let _ = tx.send(EngineEvent::ModelsRefreshed {
+            provider_id: provider.id,
+            provider_name: provider.name,
+            result,
+        });
+    });
 }
 
 pub fn spawn_benchmark_batch(

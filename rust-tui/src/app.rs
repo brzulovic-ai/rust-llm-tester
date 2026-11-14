@@ -1,10 +1,12 @@
 use crate::config::{BenchConfig, ExecutionMode, ThemeId};
-use crate::engine::{spawn_benchmark_batch, EngineEvent, ModelRunResult, RunStatus};
+use crate::engine::{
+    spawn_benchmark_batch, spawn_refresh_provider_models, EngineEvent, ModelRunResult, RunStatus,
+};
 use crate::export::{export_bundle, load_history, push_run_supabase, save_run_to_history, BenchmarkRunRecord};
 use crate::suites::{PROMPT_SUITES, SYSTEM_PERSONAS};
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use tokio::sync::{mpsc, watch};
 
@@ -31,17 +33,26 @@ impl ActiveTab {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigFocus {
+    Providers,
+    Models,
+}
+
 pub struct AppState {
     pub config: BenchConfig,
     pub config_path: PathBuf,
     pub config_dirty: bool,
     pub active_tab: ActiveTab,
+    pub config_focus: ConfigFocus,
     pub editing_prompt: bool,
     pub prompt: String,
     pub run_title: String,
     pub selected_suite_idx: usize,
     pub selected_result_idx: usize,
+    pub selected_provider_idx: usize,
     pub selected_config_idx: usize,
+    pub refreshing_providers: HashSet<String>,
     pub diff_left_idx: usize,
     pub diff_right_idx: usize,
     pub output_scroll: u16,
@@ -77,12 +88,15 @@ impl AppState {
             config_path,
             config_dirty: !from_disk,
             active_tab: ActiveTab::PromptSuites,
+            config_focus: ConfigFocus::Providers,
             editing_prompt: false,
             prompt: first_suite.prompt.to_string(),
             run_title: first_suite.title.to_string(),
             selected_suite_idx: 0,
             selected_result_idx: 0,
+            selected_provider_idx: 0,
             selected_config_idx: 0,
+            refreshing_providers: HashSet::new(),
             diff_left_idx: 0,
             diff_right_idx: 1,
             output_scroll: 0,
@@ -221,6 +235,87 @@ impl AppState {
                 }
                 self.status_message = "Benchmark batch finished and saved to local history.".to_string();
             }
+            EngineEvent::ModelsRefreshed {
+                provider_id,
+                provider_name,
+                result,
+            } => {
+                self.refreshing_providers.remove(&provider_id);
+                match result {
+                    Ok(models) => {
+                        let discovered_len = models.len();
+                        let (added_p, added_t) =
+                            self.config.aggregate_provider_models(&provider_id, &models);
+                        if added_p > 0 || added_t > 0 {
+                            match self.config.save_to_path(&self.config_path) {
+                                Ok(()) => {
+                                    self.config_dirty = false;
+                                    self.status_message = format!(
+                                        "Refreshed {}: {} models (+{} provider, +{} targets) -> saved {}",
+                                        provider_name,
+                                        discovered_len,
+                                        added_p,
+                                        added_t,
+                                        self.config_path.display()
+                                    );
+                                }
+                                Err(err) => {
+                                    self.config_dirty = true;
+                                    self.status_message = format!(
+                                        "Refreshed {} (+{} targets), save error: {}",
+                                        provider_name, added_t, err
+                                    );
+                                }
+                            }
+                        } else {
+                            self.status_message = format!(
+                                "Refreshed {}: {} models (already up to date)",
+                                provider_name, discovered_len
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        self.status_message =
+                            format!("Refresh {} failed: {}", provider_name, err);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn refresh_selected_provider(&mut self) {
+        let provider_opt = match self.config_focus {
+            ConfigFocus::Providers => self.config.providers.get(self.selected_provider_idx).cloned(),
+            ConfigFocus::Models => self
+                .config
+                .targets
+                .get(self.selected_config_idx)
+                .and_then(|t| self.config.find_provider(&t.provider_id))
+                .cloned()
+                .or_else(|| self.config.providers.get(self.selected_provider_idx).cloned()),
+        };
+
+        if let Some(provider) = provider_opt {
+            if self.refreshing_providers.contains(&provider.id) {
+                return;
+            }
+            self.refreshing_providers.insert(provider.id.clone());
+            self.status_message = format!("Refreshing models from {} ({})...", provider.name, provider.base_url);
+            spawn_refresh_provider_models(provider, self.engine_tx.clone());
+        }
+    }
+
+    pub fn refresh_all_providers(&mut self) {
+        let mut started = 0usize;
+        for provider in &self.config.providers {
+            if !self.refreshing_providers.contains(&provider.id) {
+                self.refreshing_providers.insert(provider.id.clone());
+                spawn_refresh_provider_models(provider.clone(), self.engine_tx.clone());
+                started += 1;
+            }
+        }
+        if started > 0 {
+            self.status_message = format!("Refreshing models from {} provider(s)...", started);
         }
     }
 
@@ -365,6 +460,20 @@ impl AppState {
                 self.config_dirty = true;
                 self.status_message = format!("Persona: {}", next.name);
             }
+            KeyCode::Char('d') if self.active_tab == ActiveTab::ConfigEditor => {
+                self.refresh_selected_provider();
+            }
+            KeyCode::Char('D') if self.active_tab == ActiveTab::ConfigEditor => {
+                self.refresh_all_providers();
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l')
+                if self.active_tab == ActiveTab::ConfigEditor =>
+            {
+                self.config_focus = match self.config_focus {
+                    ConfigFocus::Providers => ConfigFocus::Models,
+                    ConfigFocus::Models => ConfigFocus::Providers,
+                };
+            }
             KeyCode::Char('a') if self.active_tab == ActiveTab::DiffCompare => {
                 let len = self.ordered_results().len().max(1);
                 self.diff_left_idx = (self.diff_left_idx + 1) % len;
@@ -389,9 +498,14 @@ impl AppState {
                     self.selected_result_idx = self.selected_result_idx.saturating_sub(1);
                 }
             }
-            ActiveTab::ConfigEditor => {
-                self.selected_config_idx = self.selected_config_idx.saturating_sub(1);
-            }
+            ActiveTab::ConfigEditor => match self.config_focus {
+                ConfigFocus::Providers => {
+                    self.selected_provider_idx = self.selected_provider_idx.saturating_sub(1);
+                }
+                ConfigFocus::Models => {
+                    self.selected_config_idx = self.selected_config_idx.saturating_sub(1);
+                }
+            },
             _ => {}
         }
     }
@@ -412,11 +526,18 @@ impl AppState {
                     self.output_scroll = self.output_scroll.saturating_add(2);
                 }
             }
-            ActiveTab::ConfigEditor => {
-                if self.selected_config_idx + 1 < self.config.targets.len() {
-                    self.selected_config_idx += 1;
+            ActiveTab::ConfigEditor => match self.config_focus {
+                ConfigFocus::Providers => {
+                    if self.selected_provider_idx + 1 < self.config.providers.len() {
+                        self.selected_provider_idx += 1;
+                    }
                 }
-            }
+                ConfigFocus::Models => {
+                    if self.selected_config_idx + 1 < self.config.targets.len() {
+                        self.selected_config_idx += 1;
+                    }
+                }
+            },
             _ => {}
         }
     }
@@ -430,12 +551,25 @@ impl AppState {
                     self.status_message = format!("Loaded prompt: {}", item.title);
                 }
             }
-            ActiveTab::ConfigEditor => {
-                if let Some(target) = self.config.targets.get_mut(self.selected_config_idx) {
-                    target.enabled = !target.enabled;
-                    self.config_dirty = true;
+            ActiveTab::ConfigEditor => match self.config_focus {
+                ConfigFocus::Providers => {
+                    if let Some(provider) = self.config.providers.get(self.selected_provider_idx).cloned() {
+                        let (new_state, affected) = self.config.toggle_provider_targets(&provider.id);
+                        self.config_dirty = true;
+                        self.status_message = if new_state {
+                            format!("Enabled all {} model(s) for {}", affected, provider.name)
+                        } else {
+                            format!("Disabled all {} model(s) for {}", affected, provider.name)
+                        };
+                    }
                 }
-            }
+                ConfigFocus::Models => {
+                    if let Some(target) = self.config.targets.get_mut(self.selected_config_idx) {
+                        target.enabled = !target.enabled;
+                        self.config_dirty = true;
+                    }
+                }
+            },
             _ => {}
         }
     }
