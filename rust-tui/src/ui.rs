@@ -9,8 +9,8 @@ use ratatui::{
     symbols,
     text::{Line, Span},
     widgets::{
-        Axis, Block, Borders, Cell, Chart, Dataset, GraphType, List, ListItem, Paragraph, Row,
-        Table, Tabs, Wrap,
+        Axis, Block, Borders, Cell, Chart, Dataset, GraphType, List, ListItem, ListState,
+        Paragraph, Row, Table, Tabs, Wrap,
     },
     Frame,
 };
@@ -146,8 +146,11 @@ fn draw_header(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect
 fn draw_footer(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect) {
     let key_hints = match app.active_tab {
         ActiveTab::PromptSuites if app.editing_prompt => "EDIT MODE: Type prompt · Esc Exit Edit",
-        ActiveTab::PromptSuites => "i Edit Prompt · Enter Load Suite · r Run · t Theme · q Quit",
-        ActiveTab::ConfigEditor => "←/→ Providers/Models · Space Toggle · d Refresh · D Refresh All · m Mode · +/- Threads · s Save",
+        ActiveTab::PromptSuites => "↑/↓ Preview Suite · Enter Load Suite · i Edit Prompt · r Run · t Theme · q Quit",
+        ActiveTab::ConfigEditor if app.config_focus == ConfigFocus::ModelFilter => {
+            "FILTER MODE: Type query · Backspace Delete · Ctrl+U Clear · Enter/↓ List · Shift+Tab Next Canvas · Esc Exit"
+        }
+        ActiveTab::ConfigEditor => "Shift+Tab Next Canvas · / Filter · Space Toggle · d Refresh · D Refresh All · s Save",
         ActiveTab::DiffCompare => "a Cycle Baseline · b Cycle Candidate · r Run · e Export · q Quit",
         _ => "1-6 Tabs · r Run · R Bulk Retry · x Abort · s Save Config · e Export · t Theme · q Quit",
     };
@@ -198,16 +201,18 @@ fn draw_prompt_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: 
             .title(" Prompt Test Suites (Nerdy Kings 18 + Classic + HTML) ")
             .style(Style::default().bg(pal.surface).fg(pal.text)),
     );
-    frame.render_widget(suite_list, cols[0]);
+    let mut suite_state = ListState::default().with_selected(Some(app.selected_suite_idx));
+    frame.render_stateful_widget(suite_list, cols[0], &mut suite_state);
 
-    let active_suite_name = PROMPT_SUITES
-        .get(app.selected_suite_idx)
-        .map(|s| s.suite)
-        .unwrap_or("Custom");
+    let right_panes = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(cols[1]);
+
     let prompt_title = if app.editing_prompt {
-        format!(" Active Prompt [EDITING · {}]: {} ", active_suite_name, app.run_title)
+        format!(" Active Prompt [EDITING]: {} ", app.run_title)
     } else {
-        format!(" Active Prompt (press 'i' to edit · {}): {} ", active_suite_name, app.run_title)
+        format!(" Active Prompt (press 'i' to edit): {} ", app.run_title)
     };
     let prompt_box = Paragraph::new(app.prompt.as_str())
         .wrap(Wrap { trim: false })
@@ -218,7 +223,47 @@ fn draw_prompt_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: 
                 .border_style(Style::default().fg(if app.editing_prompt { pal.accent } else { pal.muted }))
                 .style(Style::default().bg(pal.surface).fg(pal.text)),
         );
-    frame.render_widget(prompt_box, cols[1]);
+    frame.render_widget(prompt_box, right_panes[0]);
+
+    let preview_widget = if let Some(selected_item) = PROMPT_SUITES.get(app.selected_suite_idx) {
+        let loaded_tag = if app.run_title == selected_item.title && app.prompt == selected_item.prompt {
+            "LOADED"
+        } else {
+            "Enter/Space to Load"
+        };
+        let preview_title = format!(
+            " Suite Preview [{}] · {} · {} ({}) ",
+            selected_item.id, selected_item.suite, selected_item.title, loaded_tag
+        );
+        let preview_lines = vec![
+            Line::from(vec![
+                Span::styled("Category: ", Style::default().fg(pal.muted)),
+                Span::styled(selected_item.category, Style::default().fg(pal.accent).add_modifier(Modifier::BOLD)),
+                Span::styled("   Suite: ", Style::default().fg(pal.muted)),
+                Span::styled(selected_item.suite, Style::default().fg(pal.text)),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(selected_item.prompt, Style::default().fg(pal.text))),
+        ];
+        Paragraph::new(preview_lines)
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(preview_title)
+                    .border_style(Style::default().fg(pal.accent))
+                    .style(Style::default().bg(pal.surface).fg(pal.text)),
+            )
+    } else {
+        Paragraph::new("Select a suite item to preview its prompt.")
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Suite Preview ")
+                    .style(Style::default().bg(pal.surface).fg(pal.text)),
+            )
+    };
+    frame.render_widget(preview_widget, right_panes[1]);
 }
 
 fn draw_responses_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect) {
@@ -546,10 +591,14 @@ fn draw_config_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: 
     );
     frame.render_widget(settings_panel, cols[0]);
 
-    // Right: Split vertically into Target Providers (top) & Target Models (bottom)
+    // Right: Split vertically into Target Providers (top), Filter Models (middle), & Target Models (bottom)
     let right_panes = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Length(3),
+            Constraint::Min(8),
+        ])
         .split(cols[1]);
 
     let providers_focused = app.config_focus == ConfigFocus::Providers;
@@ -597,42 +646,98 @@ fn draw_config_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: 
     let providers_list = List::new(provider_items).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Target Providers (Space: Toggle All · d: Refresh · D: All) ")
+            .title(" Target Providers (Space: Toggle All · d: Refresh · D: All · Shift+Tab: Next) ")
             .border_style(Style::default().fg(if providers_focused { pal.accent } else { pal.muted }))
             .style(Style::default().bg(pal.surface).fg(pal.text)),
     );
-    frame.render_widget(providers_list, right_panes[0]);
+    let mut providers_state = ListState::default().with_selected(if providers_focused {
+        Some(app.selected_provider_idx)
+    } else {
+        None
+    });
+    frame.render_stateful_widget(providers_list, right_panes[0], &mut providers_state);
+
+    let filter_focused = app.config_focus == ConfigFocus::ModelFilter;
+    let filter_display = if filter_focused {
+        Line::from(vec![
+            Span::styled("/ ", Style::default().fg(pal.accent).add_modifier(Modifier::BOLD)),
+            Span::styled(app.model_filter.as_str(), Style::default().fg(pal.text)),
+            Span::styled("_", Style::default().fg(pal.accent).add_modifier(Modifier::BOLD)),
+        ])
+    } else if app.model_filter.is_empty() {
+        Line::from(Span::styled(
+            "Press '/' or 'f' (or Shift+Tab) to filter models by name or provider...",
+            Style::default().fg(pal.muted),
+        ))
+    } else {
+        Line::from(vec![
+            Span::styled("/ ", Style::default().fg(pal.accent)),
+            Span::styled(app.model_filter.as_str(), Style::default().fg(pal.text)),
+        ])
+    };
+    let filter_box = Paragraph::new(filter_display).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Model Filter ")
+            .border_style(Style::default().fg(if filter_focused { pal.accent } else { pal.muted }))
+            .style(Style::default().bg(pal.surface).fg(pal.text)),
+    );
+    frame.render_widget(filter_box, right_panes[1]);
 
     let models_focused = app.config_focus == ConfigFocus::Models;
-    let target_items: Vec<ListItem> = app
-        .config
-        .targets
-        .iter()
-        .enumerate()
-        .map(|(i, t)| {
-            let sel = models_focused && i == app.selected_config_idx;
-            let mark = if t.enabled { "[x]" } else { "[ ]" };
-            let style = if sel {
-                Style::default().fg(pal.accent).add_modifier(Modifier::BOLD)
-            } else if t.enabled {
-                Style::default().fg(pal.text)
-            } else {
-                Style::default().fg(pal.muted)
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(if sel { "> " } else { "  " }, style),
-                Span::styled(format!("{} {} ", mark, t.model), style),
-                Span::styled(format!("@ {}", t.provider_id), Style::default().fg(pal.muted)),
-            ]))
-        })
-        .collect();
+    let filtered_indices = app.filtered_target_indices();
+    let total_targets = app.config.targets.len();
+    let target_items: Vec<ListItem> = if filtered_indices.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "  No models match current filter (press Esc to clear).",
+            Style::default().fg(pal.muted),
+        )))]
+    } else {
+        filtered_indices
+            .iter()
+            .enumerate()
+            .filter_map(|(vis_idx, &actual_idx)| {
+                app.config.targets.get(actual_idx).map(|t| {
+                    let sel = models_focused && vis_idx == app.selected_config_idx;
+                    let mark = if t.enabled { "[x]" } else { "[ ]" };
+                    let style = if sel {
+                        Style::default().fg(pal.accent).add_modifier(Modifier::BOLD)
+                    } else if t.enabled {
+                        Style::default().fg(pal.text)
+                    } else {
+                        Style::default().fg(pal.muted)
+                    };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(if sel { "> " } else { "  " }, style),
+                        Span::styled(format!("{} {} ", mark, t.model), style),
+                        Span::styled(format!("@ {}", t.provider_id), Style::default().fg(pal.muted)),
+                    ]))
+                })
+            })
+            .collect()
+    };
 
+    let models_title = if app.model_filter.trim().is_empty() {
+        format!(" Target Models ({} total · Space: Toggle · Shift+Tab: Next) ", total_targets)
+    } else {
+        format!(
+            " Target Models ({}/{} matching \"{}\" · Space: Toggle) ",
+            filtered_indices.len(),
+            total_targets,
+            app.model_filter.trim()
+        )
+    };
     let targets_list = List::new(target_items).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Target Models (Space/Enter: Toggle · s: Save TOML) ")
+            .title(models_title)
             .border_style(Style::default().fg(if models_focused { pal.accent } else { pal.muted }))
             .style(Style::default().bg(pal.surface).fg(pal.text)),
     );
-    frame.render_widget(targets_list, right_panes[1]);
+    let mut targets_state = ListState::default().with_selected(if models_focused && !filtered_indices.is_empty() {
+        Some(app.selected_config_idx.min(filtered_indices.len() - 1))
+    } else {
+        None
+    });
+    frame.render_stateful_widget(targets_list, right_panes[2], &mut targets_state);
 }

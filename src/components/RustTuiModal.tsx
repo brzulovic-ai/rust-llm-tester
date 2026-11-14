@@ -245,7 +245,7 @@ export const RustTuiModal: React.FC<RustTuiModalProps> = ({
                       System Prompt [p]: {String(systemPrompt.enabled)} · Persona [P]: {systemPrompt.personaId ?? 'none'}
                     </div>
                     <div className="pt-1" style={{ color: 'var(--text-muted)' }}>
-                      Target Providers (Space: Toggle All · d: Refresh · D: All):
+                      Target Providers (Space: Toggle All · d: Refresh · D: All · Shift+Tab: Next):
                     </div>
                     {providers.map((p) => {
                       const pTargets = targets.filter((t) => t.providerId === p.id);
@@ -263,7 +263,10 @@ export const RustTuiModal: React.FC<RustTuiModalProps> = ({
                       );
                     })}
                     <div className="pt-1" style={{ color: 'var(--text-muted)' }}>
-                      Target Models (←/→ Focus · Space Toggle · s Save):
+                      Model Filter [/ to type]: ________________________
+                    </div>
+                    <div style={{ color: 'var(--text-muted)' }}>
+                      Target Models (Shift+Tab: Focus · Space Toggle · s Save):
                     </div>
                     {targets.map((t) => (
                       <div key={t.id}>

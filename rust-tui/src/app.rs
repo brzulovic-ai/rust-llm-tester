@@ -37,6 +37,7 @@ impl ActiveTab {
 pub enum ConfigFocus {
     Providers,
     Models,
+    ModelFilter,
 }
 
 pub struct AppState {
@@ -52,6 +53,7 @@ pub struct AppState {
     pub selected_result_idx: usize,
     pub selected_provider_idx: usize,
     pub selected_config_idx: usize,
+    pub model_filter: String,
     pub refreshing_providers: HashSet<String>,
     pub diff_left_idx: usize,
     pub diff_right_idx: usize,
@@ -96,6 +98,7 @@ impl AppState {
             selected_result_idx: 0,
             selected_provider_idx: 0,
             selected_config_idx: 0,
+            model_filter: String::new(),
             refreshing_providers: HashSet::new(),
             diff_left_idx: 0,
             diff_right_idx: 1,
@@ -112,6 +115,51 @@ impl AppState {
 
     pub fn theme(&self) -> ThemeId {
         self.config.ui.theme
+    }
+
+    /// Returns indices into `self.config.targets` matching `self.model_filter`
+    /// across model name, provider id, and provider display name.
+    pub fn filtered_target_indices(&self) -> Vec<usize> {
+        let query = self.model_filter.trim().to_lowercase();
+        self.config
+            .targets
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                if query.is_empty() {
+                    return true;
+                }
+                let provider_name = self
+                    .config
+                    .find_provider(&t.provider_id)
+                    .map(|p| p.name.as_str())
+                    .unwrap_or("");
+                t.model.to_lowercase().contains(&query)
+                    || t.provider_id.to_lowercase().contains(&query)
+                    || provider_name.to_lowercase().contains(&query)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn clamp_model_selection(&mut self) {
+        let len = self.filtered_target_indices().len();
+        if len == 0 {
+            self.selected_config_idx = 0;
+        } else if self.selected_config_idx >= len {
+            self.selected_config_idx = len - 1;
+        }
+    }
+
+    fn cycle_config_canvas(&mut self) {
+        self.config_focus = match self.config_focus {
+            ConfigFocus::Providers => ConfigFocus::Models,
+            ConfigFocus::Models => ConfigFocus::ModelFilter,
+            ConfigFocus::ModelFilter => ConfigFocus::Providers,
+        };
+        if self.config_focus == ConfigFocus::Models {
+            self.clamp_model_selection();
+        }
     }
 
     pub fn ordered_results(&self) -> Vec<ModelRunResult> {
@@ -286,13 +334,15 @@ impl AppState {
     pub fn refresh_selected_provider(&mut self) {
         let provider_opt = match self.config_focus {
             ConfigFocus::Providers => self.config.providers.get(self.selected_provider_idx).cloned(),
-            ConfigFocus::Models => self
-                .config
-                .targets
-                .get(self.selected_config_idx)
-                .and_then(|t| self.config.find_provider(&t.provider_id))
-                .cloned()
-                .or_else(|| self.config.providers.get(self.selected_provider_idx).cloned()),
+            ConfigFocus::Models | ConfigFocus::ModelFilter => {
+                let filtered = self.filtered_target_indices();
+                filtered
+                    .get(self.selected_config_idx)
+                    .and_then(|&idx| self.config.targets.get(idx))
+                    .and_then(|t| self.config.find_provider(&t.provider_id))
+                    .cloned()
+                    .or_else(|| self.config.providers.get(self.selected_provider_idx).cloned())
+            }
         };
 
         if let Some(provider) = provider_opt {
@@ -380,6 +430,61 @@ impl AppState {
             return;
         }
 
+        if self.active_tab == ActiveTab::ConfigEditor
+            && self.config_focus == ConfigFocus::ModelFilter
+        {
+            match key.code {
+                KeyCode::BackTab => {
+                    self.cycle_config_canvas();
+                    return;
+                }
+                KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.cycle_config_canvas();
+                    return;
+                }
+                KeyCode::Tab => {
+                    self.config_focus = ConfigFocus::Models;
+                    self.clamp_model_selection();
+                    self.active_tab = ActiveTab::PromptSuites;
+                    return;
+                }
+                KeyCode::Esc => {
+                    if !self.model_filter.is_empty() {
+                        self.model_filter.clear();
+                        self.selected_config_idx = 0;
+                    }
+                    self.config_focus = ConfigFocus::Models;
+                    self.status_message = "Exited model filter.".to_string();
+                    return;
+                }
+                KeyCode::Enter | KeyCode::Down => {
+                    self.config_focus = ConfigFocus::Models;
+                    self.clamp_model_selection();
+                    return;
+                }
+                KeyCode::Up => {
+                    self.config_focus = ConfigFocus::Providers;
+                    return;
+                }
+                KeyCode::Backspace => {
+                    self.model_filter.pop();
+                    self.selected_config_idx = 0;
+                    return;
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.model_filter.clear();
+                    self.selected_config_idx = 0;
+                    return;
+                }
+                KeyCode::Char(c) => {
+                    self.model_filter.push(c);
+                    self.selected_config_idx = 0;
+                    return;
+                }
+                _ => return,
+            }
+        }
+
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('1') => self.active_tab = ActiveTab::PromptSuites,
@@ -402,6 +507,15 @@ impl AppState {
                 self.editing_prompt = true;
                 self.status_message = "Editing prompt (press Esc when done)".to_string();
             }
+            KeyCode::BackTab if self.active_tab == ActiveTab::ConfigEditor => {
+                self.cycle_config_canvas();
+            }
+            KeyCode::Tab
+                if self.active_tab == ActiveTab::ConfigEditor
+                    && key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                self.cycle_config_canvas();
+            }
             KeyCode::Tab => {
                 self.active_tab = match self.active_tab {
                     ActiveTab::PromptSuites => ActiveTab::Responses,
@@ -411,6 +525,13 @@ impl AppState {
                     ActiveTab::CapabilityGraph => ActiveTab::ConfigEditor,
                     ActiveTab::ConfigEditor => ActiveTab::PromptSuites,
                 };
+            }
+            KeyCode::Char('/') | KeyCode::Char('f')
+                if self.active_tab == ActiveTab::ConfigEditor =>
+            {
+                self.config_focus = ConfigFocus::ModelFilter;
+                self.status_message =
+                    "Filtering models (type query, Enter/Down for list, Esc clear)".to_string();
             }
             KeyCode::Up | KeyCode::Char('k') => self.navigate_up(),
             KeyCode::Down | KeyCode::Char('j') => self.navigate_down(),
@@ -469,10 +590,7 @@ impl AppState {
             KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l')
                 if self.active_tab == ActiveTab::ConfigEditor =>
             {
-                self.config_focus = match self.config_focus {
-                    ConfigFocus::Providers => ConfigFocus::Models,
-                    ConfigFocus::Models => ConfigFocus::Providers,
-                };
+                self.cycle_config_canvas();
             }
             KeyCode::Char('a') if self.active_tab == ActiveTab::DiffCompare => {
                 let len = self.ordered_results().len().max(1);
@@ -505,6 +623,9 @@ impl AppState {
                 ConfigFocus::Models => {
                     self.selected_config_idx = self.selected_config_idx.saturating_sub(1);
                 }
+                ConfigFocus::ModelFilter => {
+                    self.config_focus = ConfigFocus::Providers;
+                }
             },
             _ => {}
         }
@@ -533,9 +654,14 @@ impl AppState {
                     }
                 }
                 ConfigFocus::Models => {
-                    if self.selected_config_idx + 1 < self.config.targets.len() {
+                    let len = self.filtered_target_indices().len();
+                    if self.selected_config_idx + 1 < len {
                         self.selected_config_idx += 1;
                     }
+                }
+                ConfigFocus::ModelFilter => {
+                    self.config_focus = ConfigFocus::Models;
+                    self.clamp_model_selection();
                 }
             },
             _ => {}
@@ -564,10 +690,17 @@ impl AppState {
                     }
                 }
                 ConfigFocus::Models => {
-                    if let Some(target) = self.config.targets.get_mut(self.selected_config_idx) {
-                        target.enabled = !target.enabled;
-                        self.config_dirty = true;
+                    let filtered = self.filtered_target_indices();
+                    if let Some(&actual_idx) = filtered.get(self.selected_config_idx) {
+                        if let Some(target) = self.config.targets.get_mut(actual_idx) {
+                            target.enabled = !target.enabled;
+                            self.config_dirty = true;
+                        }
                     }
+                }
+                ConfigFocus::ModelFilter => {
+                    self.config_focus = ConfigFocus::Models;
+                    self.clamp_model_selection();
                 }
             },
             _ => {}
