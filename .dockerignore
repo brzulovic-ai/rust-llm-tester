@@ -1,0 +1,9 @@
+node_modules
+dist
+coverage
+rust-tui/target
+exports
+.env
+.env.*
+!.env.example
+.git

@@ -56,7 +56,7 @@ const PROVIDER_TEMPLATES: Array<{ kind: ProviderKind; label: string; baseUrl: st
   { kind: 'vllm', label: 'vLLM', baseUrl: 'http://localhost:8000/v1', directBrowser: false, defaultModel: 'meta-llama/Llama-3.1-8B-Instruct' },
   { kind: 'lmstudio', label: 'LM Studio', baseUrl: 'http://localhost:1234/v1', directBrowser: true, defaultModel: 'local-model' },
   { kind: 'groq', label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', directBrowser: false, defaultModel: 'llama-3.3-70b-versatile' },
-  { kind: 'litellm', label: 'LiteLLM', baseUrl: 'http://localhost:4000/v1', directBrowser: false, defaultModel: 'gpt-4o-mini' },
+  { kind: 'litellm', label: 'LiteLLM', baseUrl: 'http://localhost:4100/v1', directBrowser: false, defaultModel: 'gpt-4o-mini' },
   { kind: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', directBrowser: false, defaultModel: 'gpt-4o-mini' },
   { kind: 'custom', label: 'Custom', baseUrl: 'https://api.example.com/v1', directBrowser: false, defaultModel: 'custom-model' },
 ];

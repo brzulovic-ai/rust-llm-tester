@@ -164,7 +164,7 @@ pub fn spawn_benchmark_batch(
     targets: Vec<TargetConfig>,
     prompt: String,
     tx: mpsc::UnboundedSender<EngineEvent>,
-    mut abort_rx: watch::Receiver<bool>,
+    abort_rx: watch::Receiver<bool>,
 ) {
     tokio::spawn(async move {
         let concurrency = match cfg.execution.mode {

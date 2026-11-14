@@ -46,7 +46,6 @@ pub struct AppState {
     pub diff_right_idx: usize,
     pub output_scroll: u16,
     pub results: HashMap<String, ModelRunResult>,
-    pub ordered_ids: Vec<String>,
     pub history: Vec<BenchmarkRunRecord>,
     pub is_running: bool,
     pub status_message: String,
@@ -64,7 +63,6 @@ impl AppState {
     ) -> Self {
         let history = load_history(config.ui.history_limit);
         let first_suite = &PROMPT_SUITES[0];
-        let ordered_ids: Vec<String> = config.targets.iter().map(|t| t.id.clone()).collect();
         let status_message = if from_disk {
             format!("Loaded config: {}", config_path.display())
         } else {
@@ -89,7 +87,6 @@ impl AppState {
             diff_right_idx: 1,
             output_scroll: 0,
             results: HashMap::new(),
-            ordered_ids,
             history,
             is_running: false,
             status_message,

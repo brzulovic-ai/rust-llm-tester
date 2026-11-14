@@ -298,7 +298,28 @@ impl Default for BenchConfig {
                     api_key_env: "GROQ_API_KEY".to_string(),
                     api_key: String::new(),
                     custom_headers: HashMap::new(),
-                    models: vec!["llama-3.3-70b-versatile".to_string()],
+                    models: vec![
+                        "llama-3.3-70b-versatile".to_string(),
+                        "llama-3.1-8b-instant".to_string(),
+                        "qwen/qwen3-32b".to_string(),
+                        "openai/gpt-oss-120b".to_string(),
+                        "moonshotai/kimi-k2-instruct".to_string(),
+                    ],
+                },
+                ProviderConfig {
+                    id: "litellm".to_string(),
+                    name: "LiteLLM Proxy".to_string(),
+                    kind: "litellm".to_string(),
+                    base_url: "http://localhost:4100/v1".to_string(),
+                    api_key_env: "LITELLM_API_KEY".to_string(),
+                    api_key: String::new(),
+                    custom_headers: HashMap::new(),
+                    models: vec![
+                        "gpt-4o-mini".to_string(),
+                        "claude-3-7-sonnet".to_string(),
+                        "gemini/gemini-2.5-flash".to_string(),
+                        "deepseek/deepseek-chat".to_string(),
+                    ],
                 },
                 ProviderConfig {
                     id: "openai".to_string(),
@@ -324,6 +345,48 @@ impl Default for BenchConfig {
                     provider_id: "ollama-local".to_string(),
                     model: "qwen2.5-coder:7b".to_string(),
                     enabled: true,
+                    system_prompt_override: None,
+                },
+                TargetConfig {
+                    id: "target-groq-llama70b".to_string(),
+                    provider_id: "groq".to_string(),
+                    model: "llama-3.3-70b-versatile".to_string(),
+                    enabled: false,
+                    system_prompt_override: None,
+                },
+                TargetConfig {
+                    id: "target-groq-llama8b".to_string(),
+                    provider_id: "groq".to_string(),
+                    model: "llama-3.1-8b-instant".to_string(),
+                    enabled: false,
+                    system_prompt_override: None,
+                },
+                TargetConfig {
+                    id: "target-groq-qwen3".to_string(),
+                    provider_id: "groq".to_string(),
+                    model: "qwen/qwen3-32b".to_string(),
+                    enabled: false,
+                    system_prompt_override: None,
+                },
+                TargetConfig {
+                    id: "target-litellm-gpt4o-mini".to_string(),
+                    provider_id: "litellm".to_string(),
+                    model: "gpt-4o-mini".to_string(),
+                    enabled: false,
+                    system_prompt_override: None,
+                },
+                TargetConfig {
+                    id: "target-litellm-claude".to_string(),
+                    provider_id: "litellm".to_string(),
+                    model: "claude-3-7-sonnet".to_string(),
+                    enabled: false,
+                    system_prompt_override: None,
+                },
+                TargetConfig {
+                    id: "target-litellm-gemini".to_string(),
+                    provider_id: "litellm".to_string(),
+                    model: "gemini/gemini-2.5-flash".to_string(),
+                    enabled: false,
                     system_prompt_override: None,
                 },
             ],
@@ -511,5 +574,19 @@ mod tests {
         };
         assert_eq!(p.resolve_api_key().as_deref(), Some("sk-env-123"));
         env::remove_var("TEST_BENCHFORGE_KEY");
+    }
+
+    #[test]
+    fn default_config_includes_litellm_and_groq_models() {
+        let cfg = BenchConfig::default();
+        let litellm = cfg.find_provider("litellm").expect("litellm provider");
+        assert_eq!(litellm.base_url, "http://localhost:4100/v1");
+        assert_eq!(litellm.api_key_env, "LITELLM_API_KEY");
+        assert!(litellm.models.contains(&"gpt-4o-mini".to_string()));
+
+        let groq = cfg.find_provider("groq").expect("groq provider");
+        assert!(groq.models.contains(&"llama-3.3-70b-versatile".to_string()));
+        assert!(groq.models.contains(&"llama-3.1-8b-instant".to_string()));
+        assert!(groq.models.contains(&"qwen/qwen3-32b".to_string()));
     }
 }

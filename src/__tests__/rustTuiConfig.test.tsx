@@ -38,6 +38,10 @@ describe('Rust TUI TOML Config & Modal', () => {
     expect(toml).toContain('[[providers]]');
     expect(toml).toContain('[[targets]]');
     expect(toml).toContain('persona = "concise-expert"');
+    expect(toml).toContain('base_url = "http://localhost:4100/v1"');
+    expect(toml).toContain('api_key_env = "LITELLM_API_KEY"');
+    expect(toml).toContain('qwen/qwen3-32b');
+    expect(toml).toContain('llama-3.1-8b-instant');
   });
 
   it('omits inline secrets by default and includes them only when includeInlineSecrets is true', () => {

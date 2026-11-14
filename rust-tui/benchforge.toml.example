@@ -54,7 +54,26 @@ name = "Groq Cloud"
 kind = "groq"
 base_url = "https://api.groq.com/openai/v1"
 api_key_env = "GROQ_API_KEY"
-models = ["llama-3.3-70b-versatile"]
+models = [
+  "llama-3.3-70b-versatile",
+  "llama-3.1-8b-instant",
+  "qwen/qwen3-32b",
+  "openai/gpt-oss-120b",
+  "moonshotai/kimi-k2-instruct",
+]
+
+[[providers]]
+id = "litellm"
+name = "LiteLLM Proxy"
+kind = "litellm"
+base_url = "http://localhost:4100/v1"
+api_key_env = "LITELLM_API_KEY"
+models = [
+  "gpt-4o-mini",
+  "claude-3-7-sonnet",
+  "gemini/gemini-2.5-flash",
+  "deepseek/deepseek-chat",
+]
 
 [[providers]]
 id = "lmstudio"
@@ -71,7 +90,25 @@ model = "llama3.2:latest"
 enabled = true
 
 [[targets]]
-id = "target-groq-llama"
+id = "target-groq-llama70b"
 provider_id = "groq"
 model = "llama-3.3-70b-versatile"
 enabled = true
+
+[[targets]]
+id = "target-groq-qwen3"
+provider_id = "groq"
+model = "qwen/qwen3-32b"
+enabled = false
+
+[[targets]]
+id = "target-litellm-gpt4o"
+provider_id = "litellm"
+model = "gpt-4o-mini"
+enabled = true
+
+[[targets]]
+id = "target-litellm-claude"
+provider_id = "litellm"
+model = "claude-3-7-sonnet"
+enabled = false

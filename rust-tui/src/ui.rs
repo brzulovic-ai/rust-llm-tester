@@ -185,6 +185,7 @@ fn draw_prompt_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: 
             };
             ListItem::new(Line::from(vec![
                 Span::styled(if selected { "> " } else { "  " }, style),
+                Span::styled(format!("[{}] ", s.id), Style::default().fg(pal.muted)),
                 Span::styled(format!("{} ", s.title), style),
                 Span::styled(format!("({})", s.category), Style::default().fg(pal.muted)),
             ]))
@@ -199,10 +200,14 @@ fn draw_prompt_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: 
     );
     frame.render_widget(suite_list, cols[0]);
 
+    let active_suite_name = PROMPT_SUITES
+        .get(app.selected_suite_idx)
+        .map(|s| s.suite)
+        .unwrap_or("Custom");
     let prompt_title = if app.editing_prompt {
-        format!(" Active Prompt [EDITING]: {} ", app.run_title)
+        format!(" Active Prompt [EDITING · {}]: {} ", active_suite_name, app.run_title)
     } else {
-        format!(" Active Prompt (press 'i' to edit): {} ", app.run_title)
+        format!(" Active Prompt (press 'i' to edit · {}): {} ", active_suite_name, app.run_title)
     };
     let prompt_box = Paragraph::new(app.prompt.as_str())
         .wrap(Wrap { trim: false })
