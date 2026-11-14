@@ -37,9 +37,12 @@ Environment overrides:
 
 - `1`–`6`: Switch views (`1` Prompt & Suites, `2` Responses, `3` Network Waterfall, `4` Diff Compare, `5` XY Graph, `6` Config Editor)
 - `↑` / `↓` (in `1:Prompt`): Highlight and preview test suites below the Active Prompt canvas; press `Enter`/`Space` to load
+- `↑` / `↓` & `PgUp` / `PgDn` (`J` / `K`) (in `2:Responses`): Navigate target models (auto-scrolling list) and scroll model output
+- `o` / `←` / `→` & `O` / `v` / `Space` (in `3:Waterfall`): Change sort column (`Config Order`, `Total`, `TTFB`, `Speed`, `Model`, `Status`, `Queue`, `Request`, `Download`) and toggle Asc/Desc order
 - `Shift+Tab` (or `←` / `→` / `h` / `l` in `6:Config`): Cycle focus across **Target Providers** → **Target Models** → **Model Filter**
-- `/` or `f` (in `6:Config`): Jump straight into the **Model Filter** textbox (`Enter`/`↓` to browse matches, `Esc` to clear)
+- `/` or `f` (in `6:Config`): Jump straight into the **Model Filter** textbox (`Enter`/`↓` to browse matches, `Ctrl+D` deselects matches, `Ctrl+A` selects matches, `Esc` to clear)
 - `Space` / `Enter` (in `6:Config`): Rapidly enable/disable all models for the selected provider, or toggle an individual filtered model
+- `u` / `a` (in `6:Config`): Deselect (`u`) or select (`a`) all models matching the active filter
 - `d` / `D` (in `6:Config`): Refresh models for selected provider (`d`) or all providers (`D`) and aggregate newly discovered models into TOML
 - `r`: Run benchmark (or Bulk Retry failed targets with `R`)
 - `x`: Abort active run

@@ -40,6 +40,67 @@ pub enum ConfigFocus {
     ModelFilter,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaterfallSortField {
+    Order,
+    Model,
+    Status,
+    Queue,
+    Request,
+    Ttfb,
+    Download,
+    Total,
+    Speed,
+}
+
+impl WaterfallSortField {
+    pub fn label(self) -> &'static str {
+        match self {
+            WaterfallSortField::Order => "Config Order",
+            WaterfallSortField::Model => "Model",
+            WaterfallSortField::Status => "Status",
+            WaterfallSortField::Queue => "Queue",
+            WaterfallSortField::Request => "Request",
+            WaterfallSortField::Ttfb => "TTFB",
+            WaterfallSortField::Download => "Download",
+            WaterfallSortField::Total => "Total",
+            WaterfallSortField::Speed => "Speed",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            WaterfallSortField::Order => WaterfallSortField::Total,
+            WaterfallSortField::Total => WaterfallSortField::Ttfb,
+            WaterfallSortField::Ttfb => WaterfallSortField::Speed,
+            WaterfallSortField::Speed => WaterfallSortField::Model,
+            WaterfallSortField::Model => WaterfallSortField::Status,
+            WaterfallSortField::Status => WaterfallSortField::Queue,
+            WaterfallSortField::Queue => WaterfallSortField::Request,
+            WaterfallSortField::Request => WaterfallSortField::Download,
+            WaterfallSortField::Download => WaterfallSortField::Order,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            WaterfallSortField::Order => WaterfallSortField::Download,
+            WaterfallSortField::Download => WaterfallSortField::Request,
+            WaterfallSortField::Request => WaterfallSortField::Queue,
+            WaterfallSortField::Queue => WaterfallSortField::Status,
+            WaterfallSortField::Status => WaterfallSortField::Model,
+            WaterfallSortField::Model => WaterfallSortField::Speed,
+            WaterfallSortField::Speed => WaterfallSortField::Ttfb,
+            WaterfallSortField::Ttfb => WaterfallSortField::Total,
+            WaterfallSortField::Total => WaterfallSortField::Order,
+        }
+    }
+
+    pub fn default_desc(self) -> bool {
+        matches!(self, WaterfallSortField::Speed | WaterfallSortField::Total)
+    }
+}
+
 pub struct AppState {
     pub config: BenchConfig,
     pub config_path: PathBuf,
@@ -57,6 +118,9 @@ pub struct AppState {
     pub refreshing_providers: HashSet<String>,
     pub diff_left_idx: usize,
     pub diff_right_idx: usize,
+    pub waterfall_sort: WaterfallSortField,
+    pub waterfall_desc: bool,
+    pub waterfall_selected_idx: usize,
     pub output_scroll: u16,
     pub results: HashMap<String, ModelRunResult>,
     pub history: Vec<BenchmarkRunRecord>,
@@ -102,6 +166,9 @@ impl AppState {
             refreshing_providers: HashSet::new(),
             diff_left_idx: 0,
             diff_right_idx: 1,
+            waterfall_sort: WaterfallSortField::Order,
+            waterfall_desc: false,
+            waterfall_selected_idx: 0,
             output_scroll: 0,
             results: HashMap::new(),
             history,
@@ -160,6 +227,121 @@ impl AppState {
         if self.config_focus == ConfigFocus::Models {
             self.clamp_model_selection();
         }
+    }
+
+    pub fn deselect_filtered_targets(&mut self) {
+        let filtered = self.filtered_target_indices();
+        let mut disabled_count = 0usize;
+        for idx in &filtered {
+            if let Some(target) = self.config.targets.get_mut(*idx) {
+                if target.enabled {
+                    target.enabled = false;
+                    disabled_count += 1;
+                }
+            }
+        }
+        if disabled_count > 0 {
+            self.config_dirty = true;
+        }
+        let query = self.model_filter.trim();
+        self.status_message = if query.is_empty() {
+            format!("Deselected {} model(s).", disabled_count)
+        } else {
+            format!(
+                "Deselected {} matching model(s) for filter \"{}\".",
+                disabled_count, query
+            )
+        };
+    }
+
+    pub fn select_filtered_targets(&mut self) {
+        let filtered = self.filtered_target_indices();
+        let mut enabled_count = 0usize;
+        for idx in &filtered {
+            if let Some(target) = self.config.targets.get_mut(*idx) {
+                if !target.enabled {
+                    target.enabled = true;
+                    enabled_count += 1;
+                }
+            }
+        }
+        if enabled_count > 0 {
+            self.config_dirty = true;
+        }
+        let query = self.model_filter.trim();
+        self.status_message = if query.is_empty() {
+            format!("Selected {} model(s).", enabled_count)
+        } else {
+            format!(
+                "Selected {} matching model(s) for filter \"{}\".",
+                enabled_count, query
+            )
+        };
+    }
+
+    pub fn sorted_waterfall_results(&self) -> Vec<ModelRunResult> {
+        let mut list = self.ordered_results();
+        match self.waterfall_sort {
+            WaterfallSortField::Order => {
+                if self.waterfall_desc {
+                    list.reverse();
+                }
+            }
+            WaterfallSortField::Model => {
+                list.sort_by(|a, b| {
+                    let ord = a.model_name.to_lowercase().cmp(&b.model_name.to_lowercase());
+                    if self.waterfall_desc { ord.reverse() } else { ord }
+                });
+            }
+            WaterfallSortField::Status => {
+                list.sort_by(|a, b| {
+                    let ord = a.status.label().cmp(b.status.label());
+                    if self.waterfall_desc { ord.reverse() } else { ord }
+                });
+            }
+            WaterfallSortField::Queue => {
+                list.sort_by(|a, b| {
+                    let ord = a.timing.queue_ms.total_cmp(&b.timing.queue_ms);
+                    if self.waterfall_desc { ord.reverse() } else { ord }
+                });
+            }
+            WaterfallSortField::Request => {
+                list.sort_by(|a, b| {
+                    let ord = a.timing.request_ms.total_cmp(&b.timing.request_ms);
+                    if self.waterfall_desc { ord.reverse() } else { ord }
+                });
+            }
+            WaterfallSortField::Ttfb => {
+                list.sort_by(|a, b| match (a.timing.ttfb_ms, b.timing.ttfb_ms) {
+                    (Some(va), Some(vb)) => {
+                        let ord = va.total_cmp(&vb);
+                        if self.waterfall_desc { ord.reverse() } else { ord }
+                    }
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                });
+            }
+            WaterfallSortField::Download => {
+                list.sort_by(|a, b| {
+                    let ord = a.timing.download_ms.total_cmp(&b.timing.download_ms);
+                    if self.waterfall_desc { ord.reverse() } else { ord }
+                });
+            }
+            WaterfallSortField::Total => {
+                list.sort_by(|a, b| {
+                    let ord = a.timing.total_ms.total_cmp(&b.timing.total_ms);
+                    if self.waterfall_desc { ord.reverse() } else { ord }
+                });
+            }
+            WaterfallSortField::Speed => {
+                list.sort_by(|a, b| {
+                    let ord = a.tokens_per_sec.total_cmp(&b.tokens_per_sec);
+                    if self.waterfall_desc { ord.reverse() } else { ord }
+                });
+            }
+        }
+        list
     }
 
     pub fn ordered_results(&self) -> Vec<ModelRunResult> {
@@ -476,6 +658,14 @@ impl AppState {
                     self.selected_config_idx = 0;
                     return;
                 }
+                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.deselect_filtered_targets();
+                    return;
+                }
+                KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.select_filtered_targets();
+                    return;
+                }
                 KeyCode::Char(c) => {
                     self.model_filter.push(c);
                     self.selected_config_idx = 0;
@@ -587,10 +777,50 @@ impl AppState {
             KeyCode::Char('D') if self.active_tab == ActiveTab::ConfigEditor => {
                 self.refresh_all_providers();
             }
+            KeyCode::Char('u') if self.active_tab == ActiveTab::ConfigEditor => {
+                self.deselect_filtered_targets();
+            }
+            KeyCode::Char('a') if self.active_tab == ActiveTab::ConfigEditor => {
+                self.select_filtered_targets();
+            }
             KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l')
                 if self.active_tab == ActiveTab::ConfigEditor =>
             {
                 self.cycle_config_canvas();
+            }
+            KeyCode::Char('o') | KeyCode::Right | KeyCode::Char('l')
+                if self.active_tab == ActiveTab::Waterfall =>
+            {
+                self.waterfall_sort = self.waterfall_sort.next();
+                self.waterfall_desc = self.waterfall_sort.default_desc();
+                self.status_message = format!(
+                    "Waterfall sort: {} ({})",
+                    self.waterfall_sort.label(),
+                    if self.waterfall_desc { "desc" } else { "asc" }
+                );
+            }
+            KeyCode::Left | KeyCode::Char('h') if self.active_tab == ActiveTab::Waterfall => {
+                self.waterfall_sort = self.waterfall_sort.prev();
+                self.waterfall_desc = self.waterfall_sort.default_desc();
+                self.status_message = format!(
+                    "Waterfall sort: {} ({})",
+                    self.waterfall_sort.label(),
+                    if self.waterfall_desc { "desc" } else { "asc" }
+                );
+            }
+            KeyCode::Char('O') | KeyCode::Char('v') if self.active_tab == ActiveTab::Waterfall => {
+                self.waterfall_desc = !self.waterfall_desc;
+                self.status_message = format!(
+                    "Waterfall sort: {} ({})",
+                    self.waterfall_sort.label(),
+                    if self.waterfall_desc { "desc" } else { "asc" }
+                );
+            }
+            KeyCode::PageDown | KeyCode::Char('J') if self.active_tab == ActiveTab::Responses => {
+                self.output_scroll = self.output_scroll.saturating_add(6);
+            }
+            KeyCode::PageUp | KeyCode::Char('K') if self.active_tab == ActiveTab::Responses => {
+                self.output_scroll = self.output_scroll.saturating_sub(6);
             }
             KeyCode::Char('a') if self.active_tab == ActiveTab::DiffCompare => {
                 let len = self.ordered_results().len().max(1);
@@ -610,11 +840,19 @@ impl AppState {
                 self.selected_suite_idx = self.selected_suite_idx.saturating_sub(1);
             }
             ActiveTab::Responses => {
-                if self.output_scroll > 0 {
-                    self.output_scroll = self.output_scroll.saturating_sub(2);
-                } else {
-                    self.selected_result_idx = self.selected_result_idx.saturating_sub(1);
+                let len = self.ordered_results().len();
+                if self.selected_result_idx >= len && len > 0 {
+                    self.selected_result_idx = len - 1;
                 }
+                if self.selected_result_idx > 0 {
+                    self.selected_result_idx -= 1;
+                    self.output_scroll = 0;
+                } else {
+                    self.output_scroll = self.output_scroll.saturating_sub(2);
+                }
+            }
+            ActiveTab::Waterfall => {
+                self.waterfall_selected_idx = self.waterfall_selected_idx.saturating_sub(1);
             }
             ActiveTab::ConfigEditor => match self.config_focus {
                 ConfigFocus::Providers => {
@@ -643,8 +881,12 @@ impl AppState {
                 if len > 0 && self.selected_result_idx + 1 < len {
                     self.selected_result_idx += 1;
                     self.output_scroll = 0;
-                } else {
-                    self.output_scroll = self.output_scroll.saturating_add(2);
+                }
+            }
+            ActiveTab::Waterfall => {
+                let len = self.ordered_results().len();
+                if len > 0 && self.waterfall_selected_idx + 1 < len {
+                    self.waterfall_selected_idx += 1;
                 }
             }
             ActiveTab::ConfigEditor => match self.config_focus {
@@ -676,6 +918,14 @@ impl AppState {
                     self.run_title = item.title.to_string();
                     self.status_message = format!("Loaded prompt: {}", item.title);
                 }
+            }
+            ActiveTab::Waterfall => {
+                self.waterfall_desc = !self.waterfall_desc;
+                self.status_message = format!(
+                    "Waterfall sort: {} ({})",
+                    self.waterfall_sort.label(),
+                    if self.waterfall_desc { "desc" } else { "asc" }
+                );
             }
             ActiveTab::ConfigEditor => match self.config_focus {
                 ConfigFocus::Providers => {

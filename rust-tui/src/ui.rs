@@ -1,4 +1,4 @@
-use crate::app::{ActiveTab, AppState, ConfigFocus};
+use crate::app::{ActiveTab, AppState, ConfigFocus, WaterfallSortField};
 use crate::config::{ExecutionMode, ThemeId};
 use crate::diff::{compute_token_diff, DiffOp};
 use crate::engine::RunStatus;
@@ -10,7 +10,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         Axis, Block, Borders, Cell, Chart, Dataset, GraphType, List, ListItem, ListState,
-        Paragraph, Row, Table, Tabs, Wrap,
+        Paragraph, Row, Table, TableState, Tabs, Wrap,
     },
     Frame,
 };
@@ -147,10 +147,12 @@ fn draw_footer(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect
     let key_hints = match app.active_tab {
         ActiveTab::PromptSuites if app.editing_prompt => "EDIT MODE: Type prompt · Esc Exit Edit",
         ActiveTab::PromptSuites => "↑/↓ Preview Suite · Enter Load Suite · i Edit Prompt · r Run · t Theme · q Quit",
+        ActiveTab::Responses => "↑/↓ Select Target · PgUp/PgDn (J/K) Scroll Output · r Run · R Retry · x Abort · e Export",
+        ActiveTab::Waterfall => "o/←/→ Change Sort Column · O/v/Space Asc/Desc · ↑/↓ Scroll · r Run · e Export · q Quit",
         ActiveTab::ConfigEditor if app.config_focus == ConfigFocus::ModelFilter => {
-            "FILTER MODE: Type query · Backspace Delete · Ctrl+U Clear · Enter/↓ List · Shift+Tab Next Canvas · Esc Exit"
+            "FILTER: Type query · Ctrl+D Deselect Matches · Ctrl+A Select Matches · Ctrl+U Clear · Enter/↓ List · Shift+Tab Next"
         }
-        ActiveTab::ConfigEditor => "Shift+Tab Next Canvas · / Filter · Space Toggle · d Refresh · D Refresh All · s Save",
+        ActiveTab::ConfigEditor => "Shift+Tab Next Canvas · / Filter · Space Toggle · u Deselect Filtered · a Select Filtered · d Refresh · s Save",
         ActiveTab::DiffCompare => "a Cycle Baseline · b Cycle Candidate · r Run · e Export · q Quit",
         _ => "1-6 Tabs · r Run · R Bulk Retry · x Abort · s Save Config · e Export · t Theme · q Quit",
     };
@@ -280,11 +282,12 @@ fn draw_responses_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, are
         .constraints([Constraint::Percentage(32), Constraint::Percentage(68)])
         .split(area);
 
+    let active_idx = app.selected_result_idx.min(results.len() - 1);
     let list_items: Vec<ListItem> = results
         .iter()
         .enumerate()
         .map(|(i, r)| {
-            let sel = i == app.selected_result_idx;
+            let sel = i == active_idx;
             let status_color = match r.status {
                 RunStatus::Completed => pal.success,
                 RunStatus::Error => pal.error,
@@ -306,12 +309,13 @@ fn draw_responses_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, are
     let model_list = List::new(list_items).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Targets ")
+            .title(format!(" Targets ({}/{}) ", active_idx + 1, results.len()))
             .style(Style::default().bg(pal.surface).fg(pal.text)),
     );
-    frame.render_widget(model_list, cols[0]);
+    let mut targets_state = ListState::default().with_selected(Some(active_idx));
+    frame.render_stateful_widget(model_list, cols[0], &mut targets_state);
 
-    let active = &results[app.selected_result_idx.min(results.len() - 1)];
+    let active = &results[active_idx];
     let ttfb = active
         .timing
         .ttfb_ms
@@ -353,16 +357,32 @@ fn draw_responses_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, are
     frame.render_widget(detail, cols[1]);
 }
 
+fn header_with_sort(label: &str, active: bool, desc: bool) -> String {
+    if active {
+        format!("{} {}", label, if desc { "▼" } else { "▲" })
+    } else {
+        label.to_string()
+    }
+}
+
 fn draw_waterfall_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect) {
-    let results = app.ordered_results();
+    let results = app.sorted_waterfall_results();
     let max_ms = results
         .iter()
         .map(|r| r.timing.total_ms)
         .fold(1.0_f64, f64::max);
 
+    let active_row = if results.is_empty() {
+        None
+    } else {
+        Some(app.waterfall_selected_idx.min(results.len() - 1))
+    };
+
     let rows: Vec<Row> = results
         .iter()
-        .map(|r| {
+        .enumerate()
+        .map(|(i, r)| {
+            let sel = active_row == Some(i);
             let ttfb = r
                 .timing
                 .ttfb_ms
@@ -370,7 +390,7 @@ fn draw_waterfall_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, are
                 .unwrap_or_else(|| "-".to_string());
             let bar_len = ((r.timing.total_ms / max_ms) * 20.0).round() as usize;
             let bar = "#".repeat(bar_len.max(1));
-            Row::new(vec![
+            let row = Row::new(vec![
                 Cell::from(r.model_name.clone()),
                 Cell::from(r.status.label()),
                 Cell::from(format!("{:.1} ms", r.timing.queue_ms)),
@@ -380,9 +400,21 @@ fn draw_waterfall_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, are
                 Cell::from(format!("{:.1} ms", r.timing.total_ms)),
                 Cell::from(format!("{:.1} t/s", r.tokens_per_sec)),
                 Cell::from(bar),
-            ])
+            ]);
+            if sel {
+                row.style(Style::default().fg(pal.accent).add_modifier(Modifier::BOLD))
+            } else {
+                row
+            }
         })
         .collect();
+
+    let dir_label = if app.waterfall_desc { "▼ Desc" } else { "▲ Asc" };
+    let title = format!(
+        " DevTools Network Waterfall [Sort: {} {} · o/←/→: Field · O/v: Order] ",
+        app.waterfall_sort.label(),
+        dir_label
+    );
 
     let table = Table::new(
         rows,
@@ -400,18 +432,27 @@ fn draw_waterfall_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, are
     )
     .header(
         Row::new(vec![
-            "Model", "Status", "Queue", "Request", "TTFB", "Download", "Total", "Speed", "Timeline",
+            header_with_sort("Model", app.waterfall_sort == WaterfallSortField::Model, app.waterfall_desc),
+            header_with_sort("Status", app.waterfall_sort == WaterfallSortField::Status, app.waterfall_desc),
+            header_with_sort("Queue", app.waterfall_sort == WaterfallSortField::Queue, app.waterfall_desc),
+            header_with_sort("Request", app.waterfall_sort == WaterfallSortField::Request, app.waterfall_desc),
+            header_with_sort("TTFB", app.waterfall_sort == WaterfallSortField::Ttfb, app.waterfall_desc),
+            header_with_sort("Download", app.waterfall_sort == WaterfallSortField::Download, app.waterfall_desc),
+            header_with_sort("Total", app.waterfall_sort == WaterfallSortField::Total, app.waterfall_desc),
+            header_with_sort("Speed", app.waterfall_sort == WaterfallSortField::Speed, app.waterfall_desc),
+            "Timeline".to_string(),
         ])
         .style(Style::default().fg(pal.accent).add_modifier(Modifier::BOLD)),
     )
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" DevTools Network Waterfall ")
+            .title(title)
             .style(Style::default().bg(pal.surface).fg(pal.text)),
     );
 
-    frame.render_widget(table, area);
+    let mut table_state = TableState::default().with_selected(active_row);
+    frame.render_stateful_widget(table, area, &mut table_state);
 }
 
 fn draw_diff_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect) {
@@ -718,10 +759,13 @@ fn draw_config_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: 
     };
 
     let models_title = if app.model_filter.trim().is_empty() {
-        format!(" Target Models ({} total · Space: Toggle · Shift+Tab: Next) ", total_targets)
+        format!(
+            " Target Models ({} total · Space: Toggle · u: Deselect All · a: Select All) ",
+            total_targets
+        )
     } else {
         format!(
-            " Target Models ({}/{} matching \"{}\" · Space: Toggle) ",
+            " Target Models ({}/{} matching \"{}\" · u: Deselect · a: Select) ",
             filtered_indices.len(),
             total_targets,
             app.model_filter.trim()
