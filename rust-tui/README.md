@@ -39,9 +39,10 @@ Environment overrides:
 - `↑` / `↓` (in `1:Prompt`): Highlight and preview test suites below the Active Prompt canvas; press `Enter`/`Space` to load
 - `↑` / `↓` & `PgUp` / `PgDn` (`J` / `K`) (in `2:Responses`): Navigate target models (auto-scrolling list) and scroll model output
 - `o` / `←` / `→` & `O` / `v` / `Space` (in `3:Waterfall`): Change sort column (`Config Order`, `Total`, `TTFB`, `Speed`, `Model`, `Status`, `Queue`, `Request`, `Download`) and toggle Asc/Desc order
-- `Shift+Tab` (or `←` / `→` / `h` / `l` in `6:Config`): Cycle focus across **Target Providers** → **Target Models** → **Model Filter**
-- `/` or `f` (in `6:Config`): Jump straight into the **Model Filter** textbox (`Enter`/`↓` to browse matches, `Ctrl+D` deselects matches, `Ctrl+A` selects matches, `Esc` to clear)
-- `Space` / `Enter` (in `6:Config`): Rapidly enable/disable all models for the selected provider, or toggle an individual filtered model
+- `Shift+Tab` (or `←` / `→` / `h` / `l` in `6:Config`): Cycle focus across **Target Providers** → **Target Models** → **Model Filter** → **Saved Subgroups**
+- `/` or `f` (in `6:Config`): Jump straight into the **Model Filter** textbox (`Enter`/`↓` to browse matches, `Ctrl+D` deselects matches, `Ctrl+A` selects matches, `Ctrl+G` saves subgroup, `Esc` to clear)
+- `Space` / `Enter` (in `6:Config`): Rapidly enable/disable all models for the selected provider, toggle an individual filtered model, or in **Saved Subgroups** toggle (`Space`) / exclusively activate (`Enter`) a saved subgroup & filter (`Del`/`Backspace` deletes)
+- `g` / `Ctrl+G` (in `6:Config`): Save the current filter + enabled model selection as a named subgroup (`[[subgroups]]`) into TOML (defaults to active filter name if untouched)
 - `u` / `a` (in `6:Config`): Deselect (`u`) or select (`a`) all models matching the active filter
 - `d` / `D` (in `6:Config`): Refresh models for selected provider (`d`) or all providers (`D`) and aggregate newly discovered models into TOML
 - `r`: Run benchmark (or Bulk Retry failed targets with `R`)
@@ -52,6 +53,16 @@ Environment overrides:
 - `j` / `k` or `↑` / `↓`: Navigate lists / scroll outputs
 - `Tab`: Cycle focus panes
 - `q` / `Ctrl+C`: Quit
+
+## Mouse Support
+
+Full mouse capture (`crossterm::event::EnableMouseCapture`) is enabled across the TUI:
+- **Top Tab Bar**: Left-click any tab (`1:Prompt`–`6:Config`) to switch views, or scroll the wheel over the header to cycle tabs.
+- **`1:Prompt`**: Click a suite row to preview it (click again or click the preview box to load into Active Prompt); click **Active Prompt** to enter edit mode (click outside or press `Esc` to finish).
+- **`2:Responses`**: Click targets in the left list or scroll the wheel over the target list or response output pane.
+- **`3:Waterfall`**: Click column headers (`Model`, `Status`, `Queue`, `Request`, `TTFB`, `Download`, `Total`, `Speed`) to sort or flip Asc/Desc order; click or scroll rows.
+- **`4:Diff`**: Click the left or right half of the diff pane to cycle Baseline (A) or Candidate (B).
+- **`6:Config`**: Click **Target Providers**, **Model Filter**, **Target Models**, or **Saved Subgroups** to focus them; click `[ ]`/`[x]` checkboxes (or click a selected row again) to toggle models/providers/subgroups or solo subgroups; click rows in **Execution & Provider Configuration** (`Mode`, `Stream`, `System Prompt` / `Persona`, `Theme`) to toggle settings; scroll wheel over any list.
 
 ## Headless CI Mode
 

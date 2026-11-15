@@ -11,7 +11,7 @@ use app::AppState;
 use clap::{Parser, Subcommand};
 use config::BenchConfig;
 use crossterm::{
-    event::{self, Event},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -199,7 +199,7 @@ async fn handle_subcommand(cmd: Commands, explicit_cfg: Option<&std::path::Path>
 async fn run_tui(config: BenchConfig, config_path: PathBuf, from_disk: bool) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -209,7 +209,11 @@ async fn run_tui(config: BenchConfig, config_path: PathBuf, from_disk: bool) -> 
     let res = event_loop(&mut terminal, &mut app, &mut engine_rx).await;
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
 
     res
@@ -232,8 +236,10 @@ async fn event_loop(
         }
 
         if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                app.handle_key(key);
+            match event::read()? {
+                Event::Key(key) => app.handle_key(key),
+                Event::Mouse(mouse) => app.handle_mouse(mouse),
+                _ => {}
             }
         }
     }

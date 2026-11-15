@@ -77,8 +77,12 @@ The platform ships two synchronized interfaces backed by compatible execution se
   - Left pane for execution mode (`m`), concurrency (`+/-`), timeout (`[/]`), SSE toggle (`v`), system prompt/persona (`p`/`P`), theme (`t`), provider key status, and Supabase summary.
   - Right column split vertically into:
     1. **Target Providers**: Shows `[x]`/`[~]`/`[ ]` and `(enabled/total)` counts; `Space`/`Enter` rapidly enables or disables all models for a provider; `d`/`D` refreshes models.
-    2. **Model Filter Textbox**: Focus via `/`, `f`, or `Shift+Tab` to filter models live across model name, provider ID, and provider name; supports `Ctrl+D` (deselect matches), `Ctrl+A` (select matches), `Ctrl+U` (clear filter), and `Esc` (exit).
-    3. **Target Models**: Stateful scrollable list reachable via `Shift+Tab`, supporting per-model `Space`/`Enter` toggles plus `u` (deselect all filtered models) and `a` (select all filtered models).
+    2. **Model Filter Textbox**: Focus via `/`, `f`, or `Shift+Tab` to filter models live across model name, provider ID, and provider name; supports `Ctrl+G` (save subgroup), `Ctrl+D` (deselect matches), `Ctrl+A` (select matches), `Ctrl+U` (clear filter), and `Esc` (exit).
+    3. **Target Models**: Stateful scrollable list reachable via `Shift+Tab`, supporting per-model `Space`/`Enter` toggles plus `u` (deselect all filtered), `a` (select all filtered), and `g` (save filter + selection as subgroup).
+    4. **Saved Subgroups (`[[subgroups]]`)**: Persists named filter + target selections into `benchforge.toml` (with `.bak` backup on save); supports `Enter` / double-click (solo subgroup + restore filter), `Space` / checkbox click (toggle group), and `Del`/`Backspace` (remove).
+- **Full Mouse Click & Wheel Support**:
+  - Enabled via `EnableMouseCapture` / `DisableMouseCapture` with frame-accurate `Rect` hitboxes and list/table scroll offset synchronization (`UiLayoutZones`).
+  - Supports header tab clicking/scrolling, `1:Prompt` suite preview/load/edit clicks, `2:Responses` target selection & output wheel scrolling, `3:Waterfall` sortable column header clicks, `4:Diff` left/right baseline cycling, and `6:Config` pane focusing, checkbox toggles, subgroup actions, and execution setting clicks.
 
 ### 5.3 Headless CLI Mode
 - `benchforge init [--force]` — Scaffold `benchforge.toml`.

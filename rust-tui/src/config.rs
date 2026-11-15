@@ -251,6 +251,26 @@ impl Default for TargetConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SubgroupConfig {
+    pub id: String,
+    pub name: String,
+    pub filter: String,
+    pub target_ids: Vec<String>,
+}
+
+impl Default for SubgroupConfig {
+    fn default() -> Self {
+        Self {
+            id: "subgroup-default".to_string(),
+            name: "Default Subgroup".to_string(),
+            filter: String::new(),
+            target_ids: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BenchConfig {
@@ -260,6 +280,7 @@ pub struct BenchConfig {
     pub supabase: SupabaseConfig,
     pub providers: Vec<ProviderConfig>,
     pub targets: Vec<TargetConfig>,
+    pub subgroups: Vec<SubgroupConfig>,
 }
 
 impl Default for BenchConfig {
@@ -390,6 +411,7 @@ impl Default for BenchConfig {
                     system_prompt_override: None,
                 },
             ],
+            subgroups: Vec::new(),
         }
     }
 }
@@ -641,6 +663,122 @@ impl BenchConfig {
 
         (added_provider, added_targets)
     }
+
+    pub fn subgroup_target_counts(&self, subgroup_id: &str) -> (usize, usize) {
+        let Some(sg) = self.subgroups.iter().find(|s| s.id == subgroup_id) else {
+            return (0, 0);
+        };
+        let mut enabled = 0usize;
+        let mut total = 0usize;
+        for t in &self.targets {
+            if sg.target_ids.iter().any(|id| id == &t.id) {
+                total += 1;
+                if t.enabled {
+                    enabled += 1;
+                }
+            }
+        }
+        (enabled, total)
+    }
+
+    /// Saves or updates a named model subgroup storing both the active filter text
+    /// and selected target IDs cleanly into `benchforge.toml`.
+    pub fn save_subgroup(
+        &mut self,
+        name: &str,
+        filter: &str,
+        target_ids: Vec<String>,
+    ) -> &SubgroupConfig {
+        let clean_name = name.trim();
+        let display_name = if clean_name.is_empty() {
+            "unnamed"
+        } else {
+            clean_name
+        };
+        let clean_filter = filter.trim().to_string();
+        let mut dedup_ids = Vec::new();
+        for id in target_ids {
+            if !dedup_ids.contains(&id) {
+                dedup_ids.push(id);
+            }
+        }
+        let sg_id = sanitize_subgroup_id(display_name);
+
+        if let Some(pos) = self
+            .subgroups
+            .iter()
+            .position(|s| s.id == sg_id || s.name.eq_ignore_ascii_case(display_name))
+        {
+            let sg = &mut self.subgroups[pos];
+            sg.name = display_name.to_string();
+            sg.filter = clean_filter;
+            sg.target_ids = dedup_ids;
+            return &self.subgroups[pos];
+        }
+
+        self.subgroups.push(SubgroupConfig {
+            id: sg_id,
+            name: display_name.to_string(),
+            filter: clean_filter,
+            target_ids: dedup_ids,
+        });
+        let last = self.subgroups.len() - 1;
+        &self.subgroups[last]
+    }
+
+    pub fn delete_subgroup(&mut self, subgroup_id: &str) -> Option<SubgroupConfig> {
+        let pos = self.subgroups.iter().position(|s| s.id == subgroup_id)?;
+        Some(self.subgroups.remove(pos))
+    }
+
+    pub fn toggle_subgroup_targets(
+        &mut self,
+        subgroup_id: &str,
+    ) -> Option<(String, String, bool, usize)> {
+        let sg = self.subgroups.iter().find(|s| s.id == subgroup_id)?.clone();
+        let (enabled, total) = self.subgroup_target_counts(&sg.id);
+        let next_state = enabled < total;
+        let mut affected = 0usize;
+        for t in &mut self.targets {
+            if sg.target_ids.iter().any(|id| id == &t.id) {
+                t.enabled = next_state;
+                affected += 1;
+            }
+        }
+        Some((sg.name, sg.filter, next_state, affected))
+    }
+
+    pub fn solo_subgroup_targets(&mut self, subgroup_id: &str) -> Option<(String, String, usize)> {
+        let sg = self.subgroups.iter().find(|s| s.id == subgroup_id)?.clone();
+        let mut active = 0usize;
+        for t in &mut self.targets {
+            let member = sg.target_ids.iter().any(|id| id == &t.id);
+            t.enabled = member;
+            if member {
+                active += 1;
+            }
+        }
+        Some((sg.name, sg.filter, active))
+    }
+}
+
+fn sanitize_subgroup_id(name: &str) -> String {
+    let clean: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = clean.trim_matches('-');
+    if trimmed.is_empty() {
+        "subgroup-custom".to_string()
+    } else {
+        format!("subgroup-{}", trimmed)
+    }
 }
 
 fn sanitize_target_id(provider_id: &str, model: &str) -> String {
@@ -776,5 +914,38 @@ mod tests {
         assert!(updated_toml.contains("concurrency = 7"));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saves_applies_and_persists_subgroups_in_toml() {
+        let mut cfg = BenchConfig::default();
+        let groq_ids: Vec<String> = cfg
+            .targets
+            .iter()
+            .filter(|t| t.provider_id == "groq")
+            .take(2)
+            .map(|t| t.id.clone())
+            .collect();
+        let saved_id = cfg
+            .save_subgroup("Groq Fast", "groq", groq_ids.clone())
+            .id
+            .clone();
+        assert_eq!(cfg.subgroups.len(), 1);
+        assert_eq!(cfg.subgroups[0].filter, "groq");
+
+        let (name, filter, enabled_count) = cfg.solo_subgroup_targets(&saved_id).expect("solo");
+        assert_eq!(name, "Groq Fast");
+        assert_eq!(filter, "groq");
+        assert_eq!(enabled_count, 2);
+        assert_eq!(cfg.enabled_targets().len(), 2);
+
+        let toml_str = toml::to_string_pretty(&cfg).expect("serialize");
+        let decoded: BenchConfig = toml::from_str(&toml_str).expect("deserialize");
+        assert_eq!(decoded.subgroups.len(), 1);
+        assert_eq!(decoded.subgroups[0].target_ids, groq_ids);
+
+        let removed = cfg.delete_subgroup(&saved_id).expect("delete");
+        assert_eq!(removed.name, "Groq Fast");
+        assert!(cfg.subgroups.is_empty());
     }
 }

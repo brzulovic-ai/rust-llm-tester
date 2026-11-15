@@ -1,4 +1,4 @@
-use crate::app::{ActiveTab, AppState, ConfigFocus, WaterfallSortField};
+use crate::app::{ActiveTab, AppState, ConfigFocus, UiLayoutZones, WaterfallSortField, TAB_TITLES};
 use crate::config::{ExecutionMode, ThemeId};
 use crate::diff::{compute_token_diff, DiffOp};
 use crate::engine::RunStatus;
@@ -81,7 +81,8 @@ fn palette_for(theme: ThemeId) -> ThemePalette {
     }
 }
 
-pub fn draw(frame: &mut Frame, app: &AppState) {
+pub fn draw(frame: &mut Frame, app: &mut AppState) {
+    app.layout_zones = UiLayoutZones::default();
     let pal = palette_for(app.theme());
     let root_block = Block::default().style(Style::default().bg(pal.bg).fg(pal.text));
     frame.render_widget(root_block, frame.area());
@@ -109,15 +110,8 @@ pub fn draw(frame: &mut Frame, app: &AppState) {
     draw_footer(frame, app, &pal, chunks[2]);
 }
 
-fn draw_header(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect) {
-    let titles = [
-        "1:Prompt",
-        "2:Responses",
-        "3:Waterfall",
-        "4:Diff",
-        "5:XY Graph",
-        "6:Config",
-    ];
+fn draw_header(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette, area: Rect) {
+    app.layout_zones.header_tabs_area = area;
     let dirty_mark = if app.config_dirty { " *" } else { "" };
     let header_title = format!(
         " BenchForge TUI · {} ({}){} ",
@@ -126,13 +120,15 @@ fn draw_header(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect
         dirty_mark
     );
 
-    let tabs = Tabs::new(titles.iter().map(|t| Line::from(*t)).collect::<Vec<_>>())
+    let tabs = Tabs::new(TAB_TITLES.iter().map(|t| Line::from(*t)).collect::<Vec<_>>())
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .title(header_title)
                 .style(Style::default().bg(pal.surface).fg(pal.text)),
         )
+        .padding(" ", " ")
+        .divider(symbols::line::VERTICAL)
         .select(app.active_tab.index())
         .style(Style::default().fg(pal.muted))
         .highlight_style(
@@ -145,16 +141,22 @@ fn draw_header(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect
 
 fn draw_footer(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect) {
     let key_hints = match app.active_tab {
-        ActiveTab::PromptSuites if app.editing_prompt => "EDIT MODE: Type prompt · Esc Exit Edit",
-        ActiveTab::PromptSuites => "↑/↓ Preview Suite · Enter Load Suite · i Edit Prompt · r Run · t Theme · q Quit",
-        ActiveTab::Responses => "↑/↓ Select Target · PgUp/PgDn (J/K) Scroll Output · r Run · R Retry · x Abort · e Export",
-        ActiveTab::Waterfall => "o/←/→ Change Sort Column · O/v/Space Asc/Desc · ↑/↓ Scroll · r Run · e Export · q Quit",
-        ActiveTab::ConfigEditor if app.config_focus == ConfigFocus::ModelFilter => {
-            "FILTER: Type query · Ctrl+D Deselect Matches · Ctrl+A Select Matches · Ctrl+U Clear · Enter/↓ List · Shift+Tab Next"
+        ActiveTab::PromptSuites if app.editing_prompt => "EDIT MODE: Type prompt · Esc or Click Outside Exit Edit",
+        ActiveTab::PromptSuites => "↑/↓/Click Preview Suite · Enter/2xClick Load · i Edit · r Run · t Theme · q Quit",
+        ActiveTab::Responses => "↑/↓/Click Target · Wheel/PgUp/PgDn (J/K) Scroll Output · r Run · R Retry · x Abort",
+        ActiveTab::Waterfall => "Click Header or o/←/→ Sort · O/v/Space Asc/Desc · Wheel/↑/↓ Scroll · r Run · e Export",
+        ActiveTab::ConfigEditor if app.editing_subgroup_name => {
+            "SUBGROUP NAME: Type name (or Enter for filter name) · Ctrl+U Clear · Enter Save TOML · Esc Cancel"
         }
-        ActiveTab::ConfigEditor => "Shift+Tab Next Canvas · / Filter · Space Toggle · u Deselect Filtered · a Select Filtered · d Refresh · s Save",
-        ActiveTab::DiffCompare => "a Cycle Baseline · b Cycle Candidate · r Run · e Export · q Quit",
-        _ => "1-6 Tabs · r Run · R Bulk Retry · x Abort · s Save Config · e Export · t Theme · q Quit",
+        ActiveTab::ConfigEditor if app.config_focus == ConfigFocus::ModelFilter => {
+            "FILTER: Type query · Ctrl+G Save Subgroup · Ctrl+D Deselect · Ctrl+A Select · Enter/↓ List · Shift+Tab Next"
+        }
+        ActiveTab::ConfigEditor if app.config_focus == ConfigFocus::Subgroups => {
+            "SUBGROUPS: Enter/2xClick Solo · Space/Click [ ] Toggle · g Save New · Del Delete · Shift+Tab Next"
+        }
+        ActiveTab::ConfigEditor => "Click/Shift+Tab Panes · / Filter · g Save Subgroup · Space/Click [ ] Toggle · u Deselect · s Save",
+        ActiveTab::DiffCompare => "a / Click Left Baseline · b / Click Right Candidate · r Run · e Export · q Quit",
+        _ => "Click/1-6 Tabs · Mouse Wheel Scroll · r Run · R Retry · x Abort · s Save Config · e Export · q Quit",
     };
 
     let footer = Paragraph::new(vec![
@@ -172,7 +174,7 @@ fn draw_footer(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect
     frame.render_widget(footer, area);
 }
 
-fn draw_prompt_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect) {
+fn draw_prompt_tab(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette, area: Rect) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
@@ -205,6 +207,8 @@ fn draw_prompt_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: 
     );
     let mut suite_state = ListState::default().with_selected(Some(app.selected_suite_idx));
     frame.render_stateful_widget(suite_list, cols[0], &mut suite_state);
+    app.layout_zones.prompt_suites_area = cols[0];
+    app.layout_zones.prompt_suites_offset = suite_state.offset();
 
     let right_panes = Layout::default()
         .direction(Direction::Vertical)
@@ -214,7 +218,7 @@ fn draw_prompt_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: 
     let prompt_title = if app.editing_prompt {
         format!(" Active Prompt [EDITING]: {} ", app.run_title)
     } else {
-        format!(" Active Prompt (press 'i' to edit): {} ", app.run_title)
+        format!(" Active Prompt (click or press 'i' to edit): {} ", app.run_title)
     };
     let prompt_box = Paragraph::new(app.prompt.as_str())
         .wrap(Wrap { trim: false })
@@ -226,12 +230,13 @@ fn draw_prompt_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: 
                 .style(Style::default().bg(pal.surface).fg(pal.text)),
         );
     frame.render_widget(prompt_box, right_panes[0]);
+    app.layout_zones.prompt_active_area = right_panes[0];
 
     let preview_widget = if let Some(selected_item) = PROMPT_SUITES.get(app.selected_suite_idx) {
         let loaded_tag = if app.run_title == selected_item.title && app.prompt == selected_item.prompt {
             "LOADED"
         } else {
-            "Enter/Space to Load"
+            "Enter/Click to Load"
         };
         let preview_title = format!(
             " Suite Preview [{}] · {} · {} ({}) ",
@@ -266,12 +271,13 @@ fn draw_prompt_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: 
             )
     };
     frame.render_widget(preview_widget, right_panes[1]);
+    app.layout_zones.prompt_preview_area = right_panes[1];
 }
 
-fn draw_responses_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect) {
+fn draw_responses_tab(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette, area: Rect) {
     let results = app.ordered_results();
     if results.is_empty() {
-        let empty = Paragraph::new("No active target models. Open tab 6:Config and press Space to enable models.")
+        let empty = Paragraph::new("No active target models. Open tab 6:Config and press Space or click [ ] to enable models.")
             .block(Block::default().borders(Borders::ALL).title(" Responses "));
         frame.render_widget(empty, area);
         return;
@@ -314,6 +320,8 @@ fn draw_responses_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, are
     );
     let mut targets_state = ListState::default().with_selected(Some(active_idx));
     frame.render_stateful_widget(model_list, cols[0], &mut targets_state);
+    app.layout_zones.responses_targets_area = cols[0];
+    app.layout_zones.responses_targets_offset = targets_state.offset();
 
     let active = &results[active_idx];
     let ttfb = active
@@ -355,6 +363,7 @@ fn draw_responses_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, are
                 .style(Style::default().bg(pal.surface).fg(pal.text)),
         );
     frame.render_widget(detail, cols[1]);
+    app.layout_zones.responses_output_area = cols[1];
 }
 
 fn header_with_sort(label: &str, active: bool, desc: bool) -> String {
@@ -365,7 +374,7 @@ fn header_with_sort(label: &str, active: bool, desc: bool) -> String {
     }
 }
 
-fn draw_waterfall_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect) {
+fn draw_waterfall_tab(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette, area: Rect) {
     let results = app.sorted_waterfall_results();
     let max_ms = results
         .iter()
@@ -453,14 +462,17 @@ fn draw_waterfall_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, are
 
     let mut table_state = TableState::default().with_selected(active_row);
     frame.render_stateful_widget(table, area, &mut table_state);
+    app.layout_zones.waterfall_table_area = area;
+    app.layout_zones.waterfall_offset = table_state.offset();
 }
 
-fn draw_diff_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect) {
+fn draw_diff_tab(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette, area: Rect) {
     let results = app.ordered_results();
     if results.len() < 2 {
         let p = Paragraph::new("Run at least two models to inspect token-level diffs (press 'a'/'b' to select).")
             .block(Block::default().borders(Borders::ALL).title(" Diff Compare "));
         frame.render_widget(p, area);
+        app.layout_zones.diff_area = area;
         return;
     }
 
@@ -499,6 +511,7 @@ fn draw_diff_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Re
                 .style(Style::default().bg(pal.surface).fg(pal.text)),
         );
     frame.render_widget(diff_view, area);
+    app.layout_zones.diff_area = area;
 }
 
 fn draw_graph_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect) {
@@ -552,7 +565,7 @@ fn draw_graph_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: R
     frame.render_widget(chart, area);
 }
 
-fn draw_config_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect) {
+fn draw_config_tab(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette, area: Rect) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
@@ -631,14 +644,16 @@ fn draw_config_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: 
             .style(Style::default().bg(pal.surface).fg(pal.text)),
     );
     frame.render_widget(settings_panel, cols[0]);
+    app.layout_zones.config_settings_area = cols[0];
 
-    // Right: Split vertically into Target Providers (top), Filter Models (middle), & Target Models (bottom)
+    // Right: Split vertically into Target Providers, Filter Models, Target Models, & Saved Subgroups
     let right_panes = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(34),
+            Constraint::Percentage(26),
             Constraint::Length(3),
-            Constraint::Min(8),
+            Constraint::Min(7),
+            Constraint::Percentage(24),
         ])
         .split(cols[1]);
 
@@ -697,6 +712,8 @@ fn draw_config_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: 
         None
     });
     frame.render_stateful_widget(providers_list, right_panes[0], &mut providers_state);
+    app.layout_zones.config_providers_area = right_panes[0];
+    app.layout_zones.config_providers_offset = providers_state.offset();
 
     let filter_focused = app.config_focus == ConfigFocus::ModelFilter;
     let filter_display = if filter_focused {
@@ -707,7 +724,7 @@ fn draw_config_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: 
         ])
     } else if app.model_filter.is_empty() {
         Line::from(Span::styled(
-            "Press '/' or 'f' (or Shift+Tab) to filter models by name or provider...",
+            "Click or press '/' or 'f' (or Shift+Tab) to filter models...",
             Style::default().fg(pal.muted),
         ))
     } else {
@@ -724,6 +741,7 @@ fn draw_config_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: 
             .style(Style::default().bg(pal.surface).fg(pal.text)),
     );
     frame.render_widget(filter_box, right_panes[1]);
+    app.layout_zones.config_filter_area = right_panes[1];
 
     let models_focused = app.config_focus == ConfigFocus::Models;
     let filtered_indices = app.filtered_target_indices();
@@ -760,12 +778,12 @@ fn draw_config_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: 
 
     let models_title = if app.model_filter.trim().is_empty() {
         format!(
-            " Target Models ({} total · Space: Toggle · u: Deselect All · a: Select All) ",
+            " Target Models ({} total · Space: Toggle · u: Deselect · a: Select · g: Save Subgroup) ",
             total_targets
         )
     } else {
         format!(
-            " Target Models ({}/{} matching \"{}\" · u: Deselect · a: Select) ",
+            " Target Models ({}/{} matching \"{}\" · u: Deselect · g: Save Subgroup) ",
             filtered_indices.len(),
             total_targets,
             app.model_filter.trim()
@@ -784,4 +802,104 @@ fn draw_config_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: 
         None
     });
     frame.render_stateful_widget(targets_list, right_panes[2], &mut targets_state);
+    app.layout_zones.config_models_area = right_panes[2];
+    app.layout_zones.config_models_offset = targets_state.offset();
+
+    let subgroups_focused = app.config_focus == ConfigFocus::Subgroups || app.editing_subgroup_name;
+    if app.editing_subgroup_name {
+        let candidate_count = app.subgroup_candidate_ids().len();
+        let filter_label = if app.model_filter.trim().is_empty() {
+            "<all>"
+        } else {
+            app.model_filter.trim()
+        };
+        let prompt_lines = vec![
+            Line::from(vec![
+                Span::styled("Filter: ", Style::default().fg(pal.muted)),
+                Span::styled(filter_label, Style::default().fg(pal.text)),
+                Span::styled(
+                    format!("   Selected models: {}", candidate_count),
+                    Style::default().fg(pal.accent),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Name > ", Style::default().fg(pal.accent).add_modifier(Modifier::BOLD)),
+                Span::styled(app.subgroup_name_input.as_str(), Style::default().fg(pal.text)),
+                Span::styled("_", Style::default().fg(pal.accent).add_modifier(Modifier::BOLD)),
+            ]),
+        ];
+        let save_box = Paragraph::new(prompt_lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Save Filter + Selection as Subgroup (Enter: Save TOML · Esc: Cancel) ")
+                .border_style(Style::default().fg(pal.accent))
+                .style(Style::default().bg(pal.surface).fg(pal.text)),
+        );
+        frame.render_widget(save_box, right_panes[3]);
+        app.layout_zones.config_subgroups_area = right_panes[3];
+    } else {
+        let subgroup_items: Vec<ListItem> = if app.config.subgroups.is_empty() {
+            vec![ListItem::new(Line::from(Span::styled(
+                "  No saved subgroups yet (filter/select models and press 'g' or Ctrl+G).",
+                Style::default().fg(pal.muted),
+            )))]
+        } else {
+            app.config
+                .subgroups
+                .iter()
+                .enumerate()
+                .map(|(i, sg)| {
+                    let sel = subgroups_focused && i == app.selected_subgroup_idx;
+                    let (enabled, total) = app.config.subgroup_target_counts(&sg.id);
+                    let mark = if total > 0 && enabled == total {
+                        "[x]"
+                    } else if enabled > 0 {
+                        "[~]"
+                    } else {
+                        "[ ]"
+                    };
+                    let style = if sel {
+                        Style::default().fg(pal.accent).add_modifier(Modifier::BOLD)
+                    } else if enabled > 0 {
+                        Style::default().fg(pal.text)
+                    } else {
+                        Style::default().fg(pal.muted)
+                    };
+                    let mut spans = vec![
+                        Span::styled(if sel { "> " } else { "  " }, style),
+                        Span::styled(format!("{} {} ", mark, sg.name), style),
+                        Span::styled(format!("({}/{})", enabled, total), Style::default().fg(pal.muted)),
+                    ];
+                    if !sg.filter.is_empty() {
+                        spans.push(Span::styled(
+                            format!(" [filter: \"{}\"]", sg.filter),
+                            Style::default().fg(pal.muted),
+                        ));
+                    }
+                    ListItem::new(Line::from(spans))
+                })
+                .collect()
+        };
+
+        let subgroups_list = List::new(subgroup_items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Saved Subgroups (Enter: Solo · Space/Click [ ]: Toggle · g: Save New · Del: Remove) ")
+                .border_style(Style::default().fg(if subgroups_focused { pal.accent } else { pal.muted }))
+                .style(Style::default().bg(pal.surface).fg(pal.text)),
+        );
+        let mut subgroups_state = ListState::default().with_selected(
+            if subgroups_focused && !app.config.subgroups.is_empty() {
+                Some(
+                    app.selected_subgroup_idx
+                        .min(app.config.subgroups.len() - 1),
+                )
+            } else {
+                None
+            },
+        );
+        frame.render_stateful_widget(subgroups_list, right_panes[3], &mut subgroups_state);
+        app.layout_zones.config_subgroups_area = right_panes[3];
+        app.layout_zones.config_subgroups_offset = subgroups_state.offset();
+    }
 }
