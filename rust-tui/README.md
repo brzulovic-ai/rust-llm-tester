@@ -47,7 +47,7 @@ Environment overrides:
 - `r`: Run benchmark (or Bulk Retry failed targets with `R`)
 - `x`: Abort active run
 - `t`: Cycle theme (`Dark`, `Light`, `Sepia Light`, `Sepia Dark`, `Greenish Sepia`)
-- `s`: Save current configuration to active config path
+- `s`: Save current configuration to active config path (automatically creates a `<config>.bak` backup of the previous file before overwriting)
 - `e`: Export JSON + CSV results to `./exports/`
 - `j` / `k` or `↑` / `↓`: Navigate lists / scroll outputs
 - `Tab`: Cycle focus panes

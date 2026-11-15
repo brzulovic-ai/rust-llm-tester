@@ -504,16 +504,35 @@ impl BenchConfig {
         Ok(())
     }
 
-    pub fn save_to_path(&self, path: &Path) -> Result<()> {
+    pub fn backup_path_for(path: &Path) -> PathBuf {
+        let mut os = path.as_os_str().to_os_string();
+        os.push(".bak");
+        PathBuf::from(os)
+    }
+
+    pub fn save_with_backup(&self, path: &Path) -> Result<Option<PathBuf>> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent)?;
             }
         }
+        let backup = if path.exists() {
+            let bak = Self::backup_path_for(path);
+            fs::copy(path, &bak).with_context(|| {
+                format!("Failed to create config backup at {}", bak.display())
+            })?;
+            Some(bak)
+        } else {
+            None
+        };
         let serialized = toml::to_string_pretty(self).context("Failed to serialize config to TOML")?;
         fs::write(path, serialized)
             .with_context(|| format!("Failed to write config to {}", path.display()))?;
-        Ok(())
+        Ok(backup)
+    }
+
+    pub fn save_to_path(&self, path: &Path) -> Result<()> {
+        self.save_with_backup(path).map(|_| ())
     }
 
     pub fn find_provider(&self, id: &str) -> Option<&ProviderConfig> {
@@ -729,5 +748,33 @@ mod tests {
         let (off_state, _) = cfg.toggle_provider_targets("groq");
         assert!(!off_state);
         assert_eq!(cfg.provider_target_counts("groq").0, 0);
+    }
+
+    #[test]
+    fn save_with_backup_preserves_previous_toml() {
+        let mut dir = env::temp_dir();
+        dir.push(format!("benchforge-bak-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let cfg_path = dir.join("benchforge.toml");
+
+        let mut cfg1 = BenchConfig::default();
+        cfg1.execution.concurrency = 2;
+        let first_bak = cfg1.save_with_backup(&cfg_path).expect("first save");
+        assert!(first_bak.is_none());
+        let original_toml = fs::read_to_string(&cfg_path).expect("read original");
+
+        let mut cfg2 = cfg1.clone();
+        cfg2.execution.concurrency = 7;
+        let second_bak = cfg2
+            .save_with_backup(&cfg_path)
+            .expect("second save")
+            .expect("backup created");
+        assert_eq!(second_bak, BenchConfig::backup_path_for(&cfg_path));
+        assert_eq!(fs::read_to_string(&second_bak).expect("read bak"), original_toml);
+
+        let updated_toml = fs::read_to_string(&cfg_path).expect("read updated");
+        assert!(updated_toml.contains("concurrency = 7"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -140,12 +140,21 @@ async fn handle_subcommand(cmd: Commands, explicit_cfg: Option<&std::path::Path>
                             }
                         }
                     }
-                    cfg.save_to_path(&loaded.source_path)?;
-                    println!(
-                        "Saved {} (+{} new targets aggregated)",
-                        loaded.source_path.display(),
-                        total_added_targets
-                    );
+                    let bak = cfg.save_with_backup(&loaded.source_path)?;
+                    if let Some(bak_path) = bak {
+                        println!(
+                            "Saved {} (+{} new targets aggregated, backup: {})",
+                            loaded.source_path.display(),
+                            total_added_targets,
+                            bak_path.display()
+                        );
+                    } else {
+                        println!(
+                            "Saved {} (+{} new targets aggregated)",
+                            loaded.source_path.display(),
+                            total_added_targets
+                        );
+                    }
                     Ok(())
                 }
             }

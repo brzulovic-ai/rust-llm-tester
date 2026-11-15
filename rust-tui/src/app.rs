@@ -477,16 +477,20 @@ impl AppState {
                         let (added_p, added_t) =
                             self.config.aggregate_provider_models(&provider_id, &models);
                         if added_p > 0 || added_t > 0 {
-                            match self.config.save_to_path(&self.config_path) {
-                                Ok(()) => {
+                            match self.config.save_with_backup(&self.config_path) {
+                                Ok(bak) => {
                                     self.config_dirty = false;
+                                    let bak_note = bak
+                                        .map(|b| format!(" (backup: {})", b.display()))
+                                        .unwrap_or_default();
                                     self.status_message = format!(
-                                        "Refreshed {}: {} models (+{} provider, +{} targets) -> saved {}",
+                                        "Refreshed {}: {} models (+{} provider, +{} targets) -> saved {}{}",
                                         provider_name,
                                         discovered_len,
                                         added_p,
                                         added_t,
-                                        self.config_path.display()
+                                        self.config_path.display(),
+                                        bak_note
                                     );
                                 }
                                 Err(err) => {
@@ -556,8 +560,16 @@ impl AppState {
             self.status_message = format!("Config validation failed: {}", err);
             return;
         }
-        match self.config.save_to_path(&self.config_path) {
-            Ok(()) => {
+        match self.config.save_with_backup(&self.config_path) {
+            Ok(Some(bak)) => {
+                self.config_dirty = false;
+                self.status_message = format!(
+                    "Saved config to {} (backup: {})",
+                    self.config_path.display(),
+                    bak.display()
+                );
+            }
+            Ok(None) => {
                 self.config_dirty = false;
                 self.status_message = format!("Saved config to {}", self.config_path.display());
             }

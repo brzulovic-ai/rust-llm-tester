@@ -200,7 +200,7 @@ fn draw_prompt_tab(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: 
     let suite_list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Prompt Test Suites (Nerdy Kings 18 + Classic + HTML) ")
+            .title(" Prompt Test Suites (Nerdy Kings + Classic + HTML + Tools/Search/MCP) ")
             .style(Style::default().bg(pal.surface).fg(pal.text)),
     );
     let mut suite_state = ListState::default().with_selected(Some(app.selected_suite_idx));
