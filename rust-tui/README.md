@@ -29,8 +29,9 @@ cargo run --release
 
 Environment overrides:
 - `BENCHFORGE_THEME` (`light`, `dark`, `sepia-light`, `sepia-dark`, `greenish-sepia`)
-- `BENCHFORGE_CONCURRENCY` (`1..=10`)
+- `BENCHFORGE_CONCURRENCY` (`1..=100`)
 - `BENCHFORGE_TIMEOUT` (seconds)
+- Endpoint files for `/v1/audio/*` and `custom` multipart uploads can be configured via `[[endpoint_files]]` entries in `benchforge.toml` (`path`, `endpoint_type`, `field_name`, `mime_type`, `enabled`).
 - Provider keys are resolved safely via `api_key_env` (e.g. `OPENAI_API_KEY`, `GROQ_API_KEY`, `LITELLM_API_KEY`) so secrets do not need to be stored in plaintext TOML.
 
 ## TUI Keybindings
@@ -45,6 +46,9 @@ Environment overrides:
 - `g` / `Ctrl+G` (in `6:Config`): Save the current filter + enabled model selection as a named subgroup (`[[subgroups]]`) into TOML (defaults to active filter name if untouched)
 - `u` / `a` (in `6:Config`): Deselect (`u`) or select (`a`) all models matching the active filter
 - `d` / `D` (in `6:Config`): Refresh models for selected provider (`d`) or all providers (`D`) and aggregate newly discovered models into TOML
+- `+/-` (in `6:Config`): Adjust concurrent worker pool size (`1..=100` threads)
+- `E` (in `6:Config`): Cycle Endpoint Type (`/v1/chat/completions`, `/v1/audio/transcriptions`, `/v1/audio/translations`, `/v1/audio/speech`, `/v1/embeddings`, `/v1/responses`, `Custom Endpoint`)
+- `p` / `P` (in `6:Config`): Toggle System Prompt (`p`) or cycle 9 Engineering, Daily Use, and DevOps/SRE personas (`P`)
 - `r`: Run benchmark (or Bulk Retry failed targets with `R`)
 - `x`: Abort active run
 - `t`: Cycle theme (`Dark`, `Light`, `Sepia Light`, `Sepia Dark`, `Greenish Sepia`)

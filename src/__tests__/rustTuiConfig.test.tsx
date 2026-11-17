@@ -5,17 +5,18 @@ import { generateBenchforgeToml } from '../utils/tomlConfig';
 import { DEFAULT_PROVIDERS, DEFAULT_SUPABASE_CONFIG, DEFAULT_TARGETS } from '../utils/historyStore';
 
 describe('Rust TUI TOML Config & Modal', () => {
-  it('generates valid benchforge.toml with execution, system_prompt, ui, supabase, providers, and targets', () => {
+  it('generates valid benchforge.toml with concurrency up to 100, endpoints, and endpoint_files', () => {
     const toml = generateBenchforgeToml({
       executionConfig: {
         mode: 'parallel',
-        concurrency: 4,
+        concurrency: 100,
         timeoutSec: 240,
         stream: true,
         temperature: 0.5,
         maxTokens: 4096,
         topP: 0.9,
         seed: 7,
+        endpointType: 'audio-transcriptions',
       },
       systemPrompt: {
         enabled: true,
@@ -28,15 +29,31 @@ describe('Rust TUI TOML Config & Modal', () => {
       supabaseConfig: DEFAULT_SUPABASE_CONFIG,
       providers: DEFAULT_PROVIDERS,
       targets: DEFAULT_TARGETS,
+      endpointFiles: [
+        {
+          id: 'file-1',
+          name: 'meeting.mp3',
+          mimeType: 'audio/mpeg',
+          sizeBytes: 2048,
+          endpointScope: 'audio-transcriptions',
+          fieldName: 'file',
+          base64Data: 'AAAA',
+          enabled: true,
+          addedAt: 1000,
+        },
+      ],
     });
 
     expect(toml).toContain('[execution]');
-    expect(toml).toContain('concurrency = 4');
+    expect(toml).toContain('concurrency = 100');
+    expect(toml).toContain('endpoint_type = "audio-transcriptions"');
     expect(toml).toContain('timeout_sec = 240');
     expect(toml).toContain('seed = 7');
     expect(toml).toContain('theme = "sepia-dark"');
     expect(toml).toContain('[[providers]]');
     expect(toml).toContain('[[targets]]');
+    expect(toml).toContain('[[endpoint_files]]');
+    expect(toml).toContain('path = "meeting.mp3"');
     expect(toml).toContain('persona = "concise-expert"');
     expect(toml).toContain('base_url = "http://localhost:4100/v1"');
     expect(toml).toContain('api_key_env = "LITELLM_API_KEY"');

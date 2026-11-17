@@ -1,10 +1,18 @@
 import type {
+  EndpointFileAttachment,
   ExecutionConfig,
   ModelRunResult,
   ProviderEndpoint,
   SystemPromptConfig,
   TargetModel,
 } from '../types/benchmark';
+import {
+  base64ToUint8Array,
+  filesForEndpoint,
+  formatBytes,
+  resolveEndpointUrl,
+  shouldUseMultipartUpload,
+} from './endpointUtils';
 import {
   computeTimingMetrics,
   computeTokensPerSecond,
@@ -19,6 +27,7 @@ export interface RunTargetParams {
   prompt: string;
   systemPrompt: SystemPromptConfig;
   executionConfig: ExecutionConfig;
+  endpointFiles?: EndpointFileAttachment[];
   enqueuedAt: number;
   signal: AbortSignal;
   onUpdate: (partial: ModelRunResult) => void;
@@ -44,15 +53,47 @@ export function resolveSystemPromptForTarget(
 }
 
 export async function executeSingleTarget(params: RunTargetParams): Promise<ModelRunResult> {
-  const { target, provider, prompt, systemPrompt, executionConfig, enqueuedAt, signal, onUpdate } =
-    params;
+  const {
+    target,
+    provider,
+    prompt,
+    systemPrompt,
+    executionConfig,
+    endpointFiles = [],
+    enqueuedAt,
+    signal,
+    onUpdate,
+  } = params;
+
+  const endpointType = executionConfig.endpointType ?? 'chat-completions';
+  const matchedFiles = filesForEndpoint(endpointFiles, endpointType);
+  const resolvedUrl =
+    provider.kind === 'gemini-builtin' && endpointType === 'chat-completions'
+      ? '/api/gemini/chat'
+      : resolveEndpointUrl(provider.baseUrl, endpointType, executionConfig.customEndpoint);
+
+  // Build prompt enriched with any text file attachments for chat/text endpoints
+  let effectivePrompt = prompt;
+  if (
+    (endpointType === 'chat-completions' || endpointType === 'responses' || endpointType === 'embeddings') &&
+    matchedFiles.length > 0
+  ) {
+    const fileSections = matchedFiles
+      .map((f) =>
+        f.textPreview
+          ? `--- Attached File: ${f.name} (${f.mimeType}, ${formatBytes(f.sizeBytes)}) ---\n${f.textPreview}`
+          : `[Attached binary file: ${f.name} (${f.mimeType}, ${formatBytes(f.sizeBytes)})]`
+      )
+      .join('\n\n');
+    effectivePrompt = `${prompt}\n\n${fileSections}`.trim();
+  }
 
   const appliedSystemPrompt = resolveSystemPromptForTarget(target, systemPrompt);
   const messages: Array<{ role: 'system' | 'user'; content: string }> = [];
   if (appliedSystemPrompt) {
     messages.push({ role: 'system', content: appliedSystemPrompt });
   }
-  messages.push({ role: 'user', content: prompt });
+  messages.push({ role: 'user', content: effectivePrompt });
 
   const startedAt = performance.now();
   let timing = computeTimingMetrics(
@@ -71,16 +112,34 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
     status: 'connecting',
     output: '',
     promptTokens: estimateTokenCount(
-      (appliedSystemPrompt ? `${appliedSystemPrompt}\n` : '') + prompt
+      (appliedSystemPrompt ? `${appliedSystemPrompt}\n` : '') + effectivePrompt
     ),
     completionTokens: 0,
     totalTokens: 0,
     tokensPerSec: 0,
     timing,
     systemPromptApplied: appliedSystemPrompt,
+    endpointUrl: resolvedUrl,
   };
 
   onUpdate(currentResult);
+
+  if (
+    (endpointType === 'audio-transcriptions' || endpointType === 'audio-translations') &&
+    matchedFiles.length === 0
+  ) {
+    const completedAt = performance.now();
+    timing = computeTimingMetrics({ ...timing, completedAt }, completedAt);
+    const missingFileResult: ModelRunResult = {
+      ...currentResult,
+      status: 'error',
+      error: `Endpoint ${endpointType === 'audio-transcriptions' ? '/v1/audio/transcriptions' : '/v1/audio/translations'} requires an attached audio file.`,
+      advice: 'Upload or attach an audio file scoped to this endpoint in Configuration & Models -> Endpoint File Manager.',
+      timing,
+    };
+    onUpdate(missingFileResult);
+    return missingFileResult;
+  }
 
   const timeoutMs = Math.min(Math.max((executionConfig.timeoutSec || 300) * 1000, 1000), 600000);
   const timeoutController = new AbortController();
@@ -93,59 +152,177 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
   timeoutController.signal.addEventListener('abort', onTimeoutAbort);
 
   try {
-    let endpointUrl = '/api/proxy/chat';
+    let fetchTargetUrl = '/api/proxy/chat';
     let fetchHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
-    let fetchBody: Record<string, unknown>;
+    let fetchBodyPayload: BodyInit;
 
-    if (provider.kind === 'gemini-builtin') {
-      endpointUrl = '/api/gemini/chat';
-      fetchBody = {
-        model: target.modelName,
-        messages,
-        stream: executionConfig.stream,
-        timeoutMs,
-        seed: executionConfig.seed,
-      };
-    } else if (provider.directBrowser) {
-      const cleanBase = provider.baseUrl.trim().replace(/\/+$/, '');
-      endpointUrl = `${cleanBase}/chat/completions`;
-      fetchHeaders = {
-        'Content-Type': 'application/json',
-        ...provider.customHeaders,
-      };
-      if (provider.apiKey && !fetchHeaders['Authorization'] && !fetchHeaders['authorization']) {
-        fetchHeaders['Authorization'] = `Bearer ${provider.apiKey}`;
+    const useMultipart = shouldUseMultipartUpload(
+      endpointType,
+      executionConfig.customPayloadMode ?? 'auto',
+      matchedFiles
+    );
+
+    if (endpointType === 'chat-completions') {
+      if (provider.kind === 'gemini-builtin') {
+        fetchTargetUrl = '/api/gemini/chat';
+        fetchBodyPayload = JSON.stringify({
+          model: target.modelName,
+          messages,
+          stream: executionConfig.stream,
+          timeoutMs,
+          seed: executionConfig.seed,
+        });
+      } else if (provider.directBrowser) {
+        fetchTargetUrl = resolvedUrl;
+        fetchHeaders = {
+          'Content-Type': 'application/json',
+          ...provider.customHeaders,
+        };
+        if (provider.apiKey && !fetchHeaders['Authorization'] && !fetchHeaders['authorization']) {
+          fetchHeaders['Authorization'] = `Bearer ${provider.apiKey}`;
+        }
+        fetchBodyPayload = JSON.stringify({
+          model: target.modelName,
+          messages,
+          stream: executionConfig.stream,
+          temperature: executionConfig.temperature,
+          top_p: executionConfig.topP,
+          ...(executionConfig.maxTokens > 0 ? { max_tokens: executionConfig.maxTokens } : {}),
+          ...(typeof executionConfig.seed === 'number' ? { seed: executionConfig.seed } : {}),
+          ...(executionConfig.stream ? { stream_options: { include_usage: true } } : {}),
+        });
+      } else {
+        fetchTargetUrl = '/api/proxy/chat';
+        fetchBodyPayload = JSON.stringify({
+          baseUrl: provider.baseUrl,
+          apiKey: provider.apiKey,
+          headers: provider.customHeaders,
+          model: target.modelName,
+          messages,
+          stream: executionConfig.stream,
+          temperature: executionConfig.temperature,
+          maxTokens: executionConfig.maxTokens,
+          topP: executionConfig.topP,
+          seed: executionConfig.seed,
+          timeoutMs,
+        });
       }
-      fetchBody = {
-        model: target.modelName,
-        messages,
-        stream: executionConfig.stream,
-        temperature: executionConfig.temperature,
-        top_p: executionConfig.topP,
-        ...(executionConfig.maxTokens > 0 ? { max_tokens: executionConfig.maxTokens } : {}),
-        ...(typeof executionConfig.seed === 'number' ? { seed: executionConfig.seed } : {}),
-        ...(executionConfig.stream ? { stream_options: { include_usage: true } } : {}),
-      };
+    } else if (useMultipart) {
+      const fields: Record<string, string> = { model: target.modelName };
+      if (effectivePrompt.trim()) {
+        fields.prompt = effectivePrompt.trim();
+      }
+      if (provider.directBrowser) {
+        fetchTargetUrl = resolvedUrl;
+        fetchHeaders = { ...provider.customHeaders };
+        delete fetchHeaders['Content-Type'];
+        delete fetchHeaders['content-type'];
+        if (provider.apiKey && !fetchHeaders['Authorization'] && !fetchHeaders['authorization']) {
+          fetchHeaders['Authorization'] = `Bearer ${provider.apiKey}`;
+        }
+        const form = new FormData();
+        for (const [k, v] of Object.entries(fields)) {
+          form.append(k, v);
+        }
+        for (const f of matchedFiles) {
+          const bytes = base64ToUint8Array(f.base64Data);
+          const copy = new Uint8Array(bytes.byteLength);
+          copy.set(bytes);
+          form.append(
+            f.fieldName || 'file',
+            new Blob([copy.buffer], { type: f.mimeType || 'application/octet-stream' }),
+            f.name
+          );
+        }
+        fetchBodyPayload = form;
+      } else {
+        fetchTargetUrl = '/api/proxy/endpoint';
+        fetchBodyPayload = JSON.stringify({
+          endpointUrl: resolvedUrl,
+          apiKey: provider.apiKey,
+          headers: provider.customHeaders,
+          multipart: true,
+          fields,
+          files: matchedFiles.map((f) => ({
+            fieldName: f.fieldName || 'file',
+            name: f.name,
+            mimeType: f.mimeType,
+            base64Data: f.base64Data,
+          })),
+          timeoutMs,
+        });
+      }
     } else {
-      fetchBody = {
-        baseUrl: provider.baseUrl,
-        apiKey: provider.apiKey,
-        headers: provider.customHeaders,
-        model: target.modelName,
-        messages,
-        stream: executionConfig.stream,
-        temperature: executionConfig.temperature,
-        maxTokens: executionConfig.maxTokens,
-        topP: executionConfig.topP,
-        seed: executionConfig.seed,
-        timeoutMs,
-      };
+      // Structured JSON for audio/speech, embeddings, responses, or custom JSON endpoint
+      let jsonBody: Record<string, unknown>;
+      if (endpointType === 'audio-speech') {
+        jsonBody = {
+          model: target.modelName,
+          input: effectivePrompt,
+          voice: executionConfig.ttsVoice || 'alloy',
+          response_format: 'mp3',
+        };
+      } else if (endpointType === 'embeddings') {
+        jsonBody = {
+          model: target.modelName,
+          input: effectivePrompt,
+        };
+      } else if (endpointType === 'responses') {
+        jsonBody = {
+          model: target.modelName,
+          input: effectivePrompt,
+          ...(appliedSystemPrompt ? { instructions: appliedSystemPrompt } : {}),
+          temperature: executionConfig.temperature,
+          ...(executionConfig.maxTokens > 0 ? { max_output_tokens: executionConfig.maxTokens } : {}),
+          stream: executionConfig.stream,
+        };
+      } else {
+        jsonBody = {
+          model: target.modelName,
+          input: effectivePrompt,
+          messages,
+          temperature: executionConfig.temperature,
+          ...(executionConfig.maxTokens > 0 ? { max_tokens: executionConfig.maxTokens } : {}),
+          ...(matchedFiles.length > 0
+            ? {
+                files: matchedFiles.map((f) => ({
+                  name: f.name,
+                  mimeType: f.mimeType,
+                  textPreview: f.textPreview,
+                  base64Data: f.textPreview ? undefined : f.base64Data,
+                })),
+              }
+            : {}),
+        };
+      }
+
+      if (provider.directBrowser) {
+        fetchTargetUrl = resolvedUrl;
+        fetchHeaders = {
+          'Content-Type': 'application/json',
+          ...provider.customHeaders,
+        };
+        if (provider.apiKey && !fetchHeaders['Authorization'] && !fetchHeaders['authorization']) {
+          fetchHeaders['Authorization'] = `Bearer ${provider.apiKey}`;
+        }
+        fetchBodyPayload = JSON.stringify(jsonBody);
+      } else {
+        fetchTargetUrl = '/api/proxy/endpoint';
+        fetchBodyPayload = JSON.stringify({
+          endpointUrl: resolvedUrl,
+          apiKey: provider.apiKey,
+          headers: provider.customHeaders,
+          multipart: false,
+          jsonBody,
+          timeoutMs,
+        });
+      }
     }
 
-    const response = await fetch(endpointUrl, {
+    const response = await fetch(fetchTargetUrl, {
       method: 'POST',
       headers: fetchHeaders,
-      body: JSON.stringify(fetchBody),
+      body: fetchBodyPayload,
       signal: combinedController.signal,
     });
 
@@ -283,14 +460,75 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
       };
       onUpdate(finalResult);
       return finalResult;
+    } else if (
+      contentType.startsWith('audio/') ||
+      contentType.includes('application/octet-stream')
+    ) {
+      const buf = await response.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let bin = '';
+      for (let i = 0; i < bytes.length; i++) {
+        bin += String.fromCharCode(bytes[i]);
+      }
+      const b64 = btoa(bin);
+      const cleanMime = contentType.split(';')[0].trim() || 'audio/mpeg';
+      const completedAt = performance.now();
+      timing = computeTimingMetrics(
+        { ...timing, firstTokenAt: headersAt, completedAt },
+        completedAt
+      );
+      const audioSummary = `Generated audio response (${cleanMime}, ${formatBytes(bytes.byteLength)}) from ${resolvedUrl}`;
+      const finalResult: ModelRunResult = {
+        ...currentResult,
+        status: 'completed',
+        httpStatus: response.status,
+        output: audioSummary,
+        audioDataUrl: `data:${cleanMime};base64,${b64}`,
+        completionTokens: 1,
+        totalTokens: currentResult.promptTokens + 1,
+        tokensPerSec: 0,
+        timing,
+      };
+      onUpdate(finalResult);
+      return finalResult;
     } else {
-      // Non-streaming JSON response
+      // Non-streaming JSON / binary-wrapper / text response
       const data = (await response.json()) as {
         choices?: Array<{ message?: { content?: string } }>;
         usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+        text?: string;
+        output_text?: string;
+        binaryBase64?: string;
+        mimeType?: string;
+        sizeBytes?: number;
+        data?: Array<{ embedding?: number[]; url?: string; b64_json?: string }>;
+        [key: string]: unknown;
       };
       const completedAt = performance.now();
-      const text = data.choices?.[0]?.message?.content ?? '';
+
+      let audioDataUrl: string | undefined;
+      let text = '';
+      if (data.binaryBase64) {
+        const mime = data.mimeType || 'audio/mpeg';
+        const sizeLabel = formatBytes(data.sizeBytes ?? Math.floor((data.binaryBase64.length * 3) / 4));
+        if (mime.startsWith('audio/')) {
+          audioDataUrl = `data:${mime};base64,${data.binaryBase64}`;
+        }
+        text = `Binary response (${mime}, ${sizeLabel}) from ${resolvedUrl}`;
+      } else if (data.choices?.[0]?.message?.content !== undefined) {
+        text = data.choices[0].message.content ?? '';
+      } else if (typeof data.output_text === 'string') {
+        text = data.output_text;
+      } else if (typeof data.text === 'string') {
+        text = data.text;
+      } else if (Array.isArray(data.data) && Array.isArray(data.data[0]?.embedding)) {
+        const vec = data.data[0].embedding;
+        const preview = vec.slice(0, 8).map((v) => v.toFixed(5)).join(', ');
+        text = `Embedding Vector (${vec.length} dimensions)\n[${preview}${vec.length > 8 ? ', ...' : ''}]`;
+      } else {
+        text = JSON.stringify(data, null, 2);
+      }
+
       const promptTokens = data.usage?.prompt_tokens ?? currentResult.promptTokens;
       const completionTokens = data.usage?.completion_tokens ?? estimateTokenCount(text);
       const totalTokens = data.usage?.total_tokens ?? promptTokens + completionTokens;
@@ -305,6 +543,7 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
         status: 'completed',
         httpStatus: response.status,
         output: text,
+        audioDataUrl,
         promptTokens,
         completionTokens,
         totalTokens,
@@ -354,24 +593,33 @@ export interface RunPoolOptions {
   prompt: string;
   systemPrompt: SystemPromptConfig;
   executionConfig: ExecutionConfig;
+  endpointFiles?: EndpointFileAttachment[];
   signal: AbortSignal;
   onResultUpdate: (targetId: string, result: ModelRunResult) => void;
 }
 
 /**
  * Executes a batch of model targets using either sequential (concurrency=1)
- * or parallel worker pool (concurrency 1..10).
+ * or parallel worker pool (concurrency 1..100).
  */
 export async function runExecutionPool(options: RunPoolOptions): Promise<ModelRunResult[]> {
-  const { targets, providers, prompt, systemPrompt, executionConfig, signal, onResultUpdate } =
-    options;
+  const {
+    targets,
+    providers,
+    prompt,
+    systemPrompt,
+    executionConfig,
+    endpointFiles = [],
+    signal,
+    onResultUpdate,
+  } = options;
 
   if (targets.length === 0) return [];
 
   const workerCount =
     executionConfig.mode === 'sequential'
       ? 1
-      : Math.min(Math.max(executionConfig.concurrency || 3, 1), 10);
+      : Math.min(Math.max(executionConfig.concurrency || 3, 1), 100);
 
   const enqueuedAt = performance.now();
   const providerMap = new Map(providers.map((p) => [p.id, p]));
@@ -431,6 +679,7 @@ export async function runExecutionPool(options: RunPoolOptions): Promise<ModelRu
         prompt,
         systemPrompt,
         executionConfig,
+        endpointFiles,
         enqueuedAt,
         signal,
         onUpdate: (partial) => onResultUpdate(target.id, partial),

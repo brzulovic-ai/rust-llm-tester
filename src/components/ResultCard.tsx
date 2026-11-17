@@ -4,6 +4,7 @@ import {
   Check,
   Code2,
   Copy,
+  Download,
   FileText,
   Globe,
   Loader2,
@@ -112,6 +113,14 @@ export const ResultCard: React.FC<ResultCardProps> = ({ result, onRetry }) => {
             <span>{result.completionTokens} out tok</span>
             <span aria-hidden="true">·</span>
             <span>Total {formatMs(result.timing.totalMs)}</span>
+            {result.endpointUrl && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span className="truncate max-w-[220px]" title={result.endpointUrl}>
+                  {result.endpointUrl}
+                </span>
+              </>
+            )}
           </div>
         </div>
 
@@ -235,6 +244,29 @@ export const ResultCard: React.FC<ResultCardProps> = ({ result, onRetry }) => {
           </div>
         )}
 
+        {result.audioDataUrl && activeTab !== 'audio' && (
+          <div
+            className="mb-3 p-2.5 rounded-lg border space-y-2"
+            style={{ borderColor: 'var(--border-subtle)', backgroundColor: 'var(--bg-elevated)' }}
+          >
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-medium" style={{ color: 'var(--text-primary)' }}>
+                Generated Audio Output
+              </span>
+              <a
+                href={result.audioDataUrl}
+                download={`${result.modelName.replace(/[^a-z0-9-_]/gi, '_')}-speech.mp3`}
+                className="inline-flex items-center gap-1 text-[11px] hover:underline"
+                style={{ color: 'var(--accent-primary)' }}
+              >
+                <Download className="w-3 h-3" />
+                <span>Download Audio</span>
+              </a>
+            </div>
+            <audio controls src={result.audioDataUrl} className="w-full h-8" />
+          </div>
+        )}
+
         {result.status === 'queued' && !result.output && (
           <p className="text-xs font-mono" style={{ color: 'var(--text-muted)' }}>
             Waiting for worker slot...
@@ -243,7 +275,7 @@ export const ResultCard: React.FC<ResultCardProps> = ({ result, onRetry }) => {
 
         {result.status === 'connecting' && !result.output && (
           <p className="text-xs font-mono" style={{ color: 'var(--text-muted)' }}>
-            Opening SSE connection and awaiting first byte...
+            Opening connection and awaiting first byte...
           </p>
         )}
 
@@ -289,10 +321,34 @@ export const ResultCard: React.FC<ResultCardProps> = ({ result, onRetry }) => {
         )}
 
         {activeTab === 'audio' && (
-          <TtsPlayer text={result.output} modelName={result.modelName} />
+          <div className="space-y-3">
+            {result.audioDataUrl && (
+              <div
+                className="p-3 rounded-lg border space-y-2"
+                style={{ borderColor: 'var(--border-subtle)', backgroundColor: 'var(--bg-elevated)' }}
+              >
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-medium" style={{ color: 'var(--text-primary)' }}>
+                    Endpoint Audio Stream
+                  </span>
+                  <a
+                    href={result.audioDataUrl}
+                    download={`${result.modelName.replace(/[^a-z0-9-_]/gi, '_')}-speech.mp3`}
+                    className="inline-flex items-center gap-1 text-[11px] hover:underline"
+                    style={{ color: 'var(--accent-primary)' }}
+                  >
+                    <Download className="w-3 h-3" />
+                    <span>Download Audio</span>
+                  </a>
+                </div>
+                <audio controls src={result.audioDataUrl} className="w-full" />
+              </div>
+            )}
+            <TtsPlayer text={result.output} modelName={result.modelName} />
+          </div>
         )}
 
-        {!result.output && result.status === 'idle' && (
+        {!result.output && !result.audioDataUrl && result.status === 'idle' && (
           <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
             Ready. Click Run Benchmark to start inference.
           </p>

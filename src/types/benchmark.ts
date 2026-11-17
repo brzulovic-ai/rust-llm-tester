@@ -43,6 +43,30 @@ export interface SystemPromptConfig {
   targetModelIds: string[];
 }
 
+export type EndpointType =
+  | 'chat-completions'
+  | 'audio-transcriptions'
+  | 'audio-translations'
+  | 'audio-speech'
+  | 'embeddings'
+  | 'responses'
+  | 'custom';
+
+export type EndpointPayloadMode = 'auto' | 'json' | 'multipart';
+
+export interface EndpointFileAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  endpointScope: EndpointType | 'all';
+  fieldName: string;
+  base64Data: string;
+  textPreview?: string;
+  enabled: boolean;
+  addedAt: number;
+}
+
 export interface ExecutionConfig {
   mode: 'parallel' | 'sequential';
   concurrency: number;
@@ -52,6 +76,10 @@ export interface ExecutionConfig {
   maxTokens: number;
   topP: number;
   seed?: number;
+  endpointType?: EndpointType;
+  customEndpoint?: string;
+  customPayloadMode?: EndpointPayloadMode;
+  ttsVoice?: string;
 }
 
 export type RunStatus = 'idle' | 'queued' | 'connecting' | 'streaming' | 'completed' | 'error' | 'aborted';
@@ -85,6 +113,8 @@ export interface ModelRunResult {
   advice?: string;
   httpStatus?: number;
   systemPromptApplied?: string;
+  audioDataUrl?: string;
+  endpointUrl?: string;
 }
 
 export interface BenchmarkRunRecord {

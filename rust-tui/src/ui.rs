@@ -202,7 +202,7 @@ fn draw_prompt_tab(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette, ar
     let suite_list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Prompt Test Suites (Nerdy Kings + Classic + HTML + Tools/Search/MCP) ")
+            .title(" Prompt Test Suites (Systems & Reasoning + Classic + HTML + Tools/Search/MCP) ")
             .style(Style::default().bg(pal.surface).fg(pal.text)),
     );
     let mut suite_state = ListState::default().with_selected(Some(app.selected_suite_idx));
@@ -590,7 +590,7 @@ fn draw_config_tab(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette, ar
         )),
         Line::from(""),
         Line::from(format!(
-            "Execution Mode [m]: {}   Threads [+/-]: {}",
+            "Execution Mode [m]: {}   Threads [+/-]: {}/100",
             mode_label, app.config.execution.concurrency
         )),
         Line::from(format!(
@@ -606,6 +606,11 @@ fn draw_config_tab(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette, ar
             app.config.system_prompt.enabled, persona_label
         )),
         Line::from(format!("Theme [t]: {}", app.theme().label())),
+        Line::from(format!(
+            "Endpoint [E]: {}   Files: {} active",
+            app.config.execution.endpoint_type.label(),
+            app.config.matching_endpoint_files().len()
+        )),
         Line::from(""),
         Line::from(Span::styled(
             "Configured Providers & Key Status:",

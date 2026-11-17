@@ -1,4 +1,5 @@
 import type {
+  EndpointFileAttachment,
   ExecutionConfig,
   ProviderEndpoint,
   SupabaseConfig,
@@ -35,6 +36,7 @@ export interface TomlExportInput {
   supabaseConfig: SupabaseConfig;
   providers: ProviderEndpoint[];
   targets: TargetModel[];
+  endpointFiles?: EndpointFileAttachment[];
   includeInlineSecrets?: boolean;
 }
 
@@ -46,6 +48,7 @@ export function generateBenchforgeToml(input: TomlExportInput): string {
     supabaseConfig,
     providers,
     targets,
+    endpointFiles = [],
     includeInlineSecrets = false,
   } = input;
 
@@ -55,14 +58,21 @@ export function generateBenchforgeToml(input: TomlExportInput): string {
     '',
     '[execution]',
     `mode = ${tomlString(executionConfig.mode)}`,
-    `concurrency = ${Math.min(Math.max(executionConfig.concurrency, 1), 10)}`,
+    `concurrency = ${Math.min(Math.max(executionConfig.concurrency, 1), 100)}`,
     `timeout_sec = ${Math.min(Math.max(executionConfig.timeoutSec, 5), 600)}`,
     `stream = ${executionConfig.stream}`,
     `temperature = ${executionConfig.temperature}`,
     `max_tokens = ${executionConfig.maxTokens}`,
     `top_p = ${executionConfig.topP}`,
+    `endpoint_type = ${tomlString(executionConfig.endpointType ?? 'chat-completions')}`,
   ];
 
+  if (executionConfig.customEndpoint?.trim()) {
+    lines.push(`custom_endpoint = ${tomlString(executionConfig.customEndpoint.trim())}`);
+  }
+  if (executionConfig.ttsVoice?.trim()) {
+    lines.push(`tts_voice = ${tomlString(executionConfig.ttsVoice.trim())}`);
+  }
   if (typeof executionConfig.seed === 'number') {
     lines.push(`seed = ${executionConfig.seed}`);
   }
@@ -130,6 +140,19 @@ export function generateBenchforgeToml(input: TomlExportInput): string {
     if (t.systemPromptOverride?.trim()) {
       lines.push(`system_prompt_override = ${tomlString(t.systemPromptOverride.trim())}`);
     }
+  }
+
+  for (const f of endpointFiles) {
+    lines.push(
+      '',
+      '[[endpoint_files]]',
+      `id = ${tomlString(f.id)}`,
+      `path = ${tomlString(f.name)}`,
+      `mime_type = ${tomlString(f.mimeType)}`,
+      `endpoint_type = ${tomlString(f.endpointScope)}`,
+      `field_name = ${tomlString(f.fieldName || 'file')}`,
+      `enabled = ${f.enabled}`
+    );
   }
 
   lines.push('');

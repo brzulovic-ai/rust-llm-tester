@@ -95,7 +95,7 @@ function createGeminiClient(): GoogleGenAI | null {
 
 async function startServer() {
   const app = express();
-  app.use(express.json({ limit: '10mb' }));
+  app.use(express.json({ limit: '50mb' }));
 
   app.get('/api/health', (_req: Request, res: Response) => {
     res.json({
@@ -272,6 +272,157 @@ async function startServer() {
         error: errObj?.message ?? 'Network failure calling upstream LLM API',
         code,
         advice: buildTroubleshootingAdvice(status, code, baseUrl),
+      });
+    }
+  });
+
+  app.post('/api/proxy/endpoint', async (req: Request, res: Response) => {
+    const body = req.body as {
+      endpointUrl?: string;
+      apiKey?: string;
+      headers?: Record<string, string>;
+      multipart?: boolean;
+      fields?: Record<string, string>;
+      files?: Array<{ fieldName?: string; name?: string; mimeType?: string; base64Data?: string }>;
+      jsonBody?: Record<string, unknown>;
+      timeoutMs?: number;
+    };
+
+    const targetUrl = body?.endpointUrl?.trim() ?? '';
+    if (!targetUrl || (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://'))) {
+      res.status(400).json({ error: 'Valid http/https endpointUrl is required' });
+      return;
+    }
+
+    const timeoutMs = Math.min(Math.max(body.timeoutMs ?? 300000, 1000), 600000);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    req.on('close', () => {
+      if (!res.writableEnded) {
+        controller.abort();
+      }
+    });
+
+    const headers: Record<string, string> = {
+      ...(body.headers ?? {}),
+    };
+    if (body.apiKey && !headers['Authorization'] && !headers['authorization']) {
+      headers['Authorization'] = `Bearer ${body.apiKey}`;
+    }
+
+    let requestInit: RequestInit;
+    if (body.multipart) {
+      delete headers['Content-Type'];
+      delete headers['content-type'];
+      const form = new FormData();
+      if (body.fields) {
+        for (const [k, v] of Object.entries(body.fields)) {
+          if (v !== undefined && v !== null) {
+            form.append(k, String(v));
+          }
+        }
+      }
+      if (Array.isArray(body.files)) {
+        for (const f of body.files) {
+          if (!f?.base64Data) continue;
+          const bytes = Buffer.from(f.base64Data, 'base64');
+          const blob = new Blob([bytes], { type: f.mimeType || 'application/octet-stream' });
+          form.append(f.fieldName || 'file', blob, f.name || 'upload.bin');
+        }
+      }
+      requestInit = {
+        method: 'POST',
+        headers,
+        body: form,
+        signal: controller.signal,
+      };
+    } else {
+      if (!headers['Content-Type'] && !headers['content-type']) {
+        headers['Content-Type'] = 'application/json';
+      }
+      requestInit = {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body.jsonBody ?? {}),
+        signal: controller.signal,
+      };
+    }
+
+    try {
+      const upstream = await fetch(targetUrl, requestInit);
+      if (!upstream.ok) {
+        clearTimeout(timeoutId);
+        const errorText = await upstream.text();
+        res.status(upstream.status).json({
+          error: `Upstream API error (${upstream.status})`,
+          details: errorText.slice(0, 1200),
+          advice: buildTroubleshootingAdvice(upstream.status, undefined, targetUrl),
+        });
+        return;
+      }
+
+      const contentType = upstream.headers.get('content-type') ?? '';
+      if (contentType.includes('text/event-stream') && upstream.body) {
+        res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.flushHeaders();
+
+        const reader = upstream.body.getReader();
+        const decoder = new TextDecoder();
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value) {
+              res.write(decoder.decode(value, { stream: true }));
+            }
+          }
+          clearTimeout(timeoutId);
+          res.end();
+        } catch (streamErr: unknown) {
+          clearTimeout(timeoutId);
+          const errObj = streamErr as { name?: string; message?: string };
+          if (!res.writableEnded) {
+            const errorEvent = JSON.stringify({
+              error: {
+                message: errObj?.message ?? 'Stream interrupted',
+                code: errObj?.name,
+                advice: buildTroubleshootingAdvice(504, errObj?.name, targetUrl),
+              },
+            });
+            res.write(`data: ${errorEvent}\n\n`);
+            res.end();
+          }
+        }
+      } else if (
+        contentType.startsWith('audio/') ||
+        contentType.startsWith('image/') ||
+        contentType.includes('application/octet-stream')
+      ) {
+        const buf = Buffer.from(await upstream.arrayBuffer());
+        clearTimeout(timeoutId);
+        res.json({
+          binaryBase64: buf.toString('base64'),
+          mimeType: contentType.split(';')[0].trim() || 'application/octet-stream',
+          sizeBytes: buf.length,
+        });
+      } else {
+        const bodyText = await upstream.text();
+        clearTimeout(timeoutId);
+        res.setHeader('Content-Type', contentType || 'application/json; charset=utf-8');
+        res.send(bodyText);
+      }
+    } catch (err: unknown) {
+      clearTimeout(timeoutId);
+      const errObj = err as { name?: string; message?: string; cause?: { code?: string } };
+      const code = errObj?.cause?.code ?? errObj?.name;
+      const status = code === 'AbortError' ? 504 : 502;
+      res.status(status).json({
+        error: errObj?.message ?? 'Network failure calling upstream endpoint',
+        code,
+        advice: buildTroubleshootingAdvice(status, code, targetUrl),
       });
     }
   });

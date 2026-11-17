@@ -1,5 +1,5 @@
 use crate::config::{
-    BenchConfig, ExecutionMode, ProviderConfig, SystemTargetMode, TargetConfig,
+    BenchConfig, EndpointType, ExecutionMode, ProviderConfig, SystemTargetMode, TargetConfig,
 };
 use crate::suites::lookup_persona;
 use futures::StreamExt;
@@ -259,7 +259,7 @@ pub fn spawn_benchmark_batch(
     tokio::spawn(async move {
         let concurrency = match cfg.execution.mode {
             ExecutionMode::Sequential => 1,
-            ExecutionMode::Parallel => cfg.execution.concurrency.clamp(1, 10),
+            ExecutionMode::Parallel => cfg.execution.concurrency.clamp(1, 100),
         };
         let semaphore = Arc::new(Semaphore::new(concurrency));
         let batch_start = Instant::now();
@@ -366,6 +366,64 @@ pub fn spawn_benchmark_batch(
     });
 }
 
+pub fn resolve_endpoint_url(
+    base_url: &str,
+    endpoint_type: EndpointType,
+    custom_endpoint: &str,
+) -> String {
+    let clean_base = base_url.trim().trim_end_matches('/');
+    if endpoint_type == EndpointType::Custom {
+        let raw = custom_endpoint.trim();
+        if raw.is_empty() {
+            return format!("{}/chat/completions", clean_base);
+        }
+        if raw.starts_with("http://") || raw.starts_with("https://") {
+            return raw.to_string();
+        }
+        let rel = if raw.starts_with('/') {
+            raw.to_string()
+        } else {
+            format!("/{}", raw)
+        };
+        if clean_base.ends_with("/v1") && (rel == "/v1" || rel.starts_with("/v1/")) {
+            return format!("{}{}", clean_base, &rel[3..]);
+        }
+        return format!("{}{}", clean_base, rel);
+    }
+    format!("{}{}", clean_base, endpoint_type.suffix())
+}
+
+fn build_multipart_body(
+    boundary: &str,
+    fields: &[(&str, &str)],
+    files: &[(&str, &str, &str, &[u8])],
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    for (name, val) in fields {
+        buf.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+        buf.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{}\"\r\n\r\n", name).as_bytes(),
+        );
+        buf.extend_from_slice(val.as_bytes());
+        buf.extend_from_slice(b"\r\n");
+    }
+    for (field_name, filename, mime_type, bytes) in files {
+        buf.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+        buf.extend_from_slice(
+            format!(
+                "Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\n",
+                field_name, filename
+            )
+            .as_bytes(),
+        );
+        buf.extend_from_slice(format!("Content-Type: {}\r\n\r\n", mime_type).as_bytes());
+        buf.extend_from_slice(bytes);
+        buf.extend_from_slice(b"\r\n");
+    }
+    buf.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
+    buf
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_single_target(
     client: reqwest::Client,
@@ -380,34 +438,46 @@ async fn run_single_target(
     let dispatched_at = Instant::now();
     let queue_ms = dispatched_at.duration_since(batch_start).as_secs_f64() * 1000.0;
     let sys_prompt = resolve_system_prompt(target, cfg);
+    let endpoint_type = cfg.execution.endpoint_type;
+    let matched_files = cfg.matching_endpoint_files();
+
+    // Inject text attachments into prompt for text endpoints when present
+    let mut effective_prompt = prompt.to_string();
+    if matches!(
+        endpoint_type,
+        EndpointType::ChatCompletions | EndpointType::Responses | EndpointType::Embeddings
+    ) && !matched_files.is_empty()
+    {
+        let mut attachment_blocks = Vec::new();
+        for f in &matched_files {
+            if let Ok(raw) = tokio::fs::read(&f.path).await {
+                let text = String::from_utf8_lossy(&raw);
+                let snippet: String = text.chars().take(16000).collect();
+                let name = std::path::Path::new(&f.path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&f.path);
+                attachment_blocks.push(format!("[Attached File: {}]\n{}", name, snippet));
+            }
+        }
+        if !attachment_blocks.is_empty() {
+            if effective_prompt.trim().is_empty() {
+                effective_prompt = attachment_blocks.join("\n\n");
+            } else {
+                effective_prompt = format!("{}\n\n{}", effective_prompt, attachment_blocks.join("\n\n"));
+            }
+        }
+    }
 
     let mut messages = Vec::new();
-    let mut est_prompt_tokens = estimate_tokens(prompt);
+    let mut est_prompt_tokens = estimate_tokens(&effective_prompt);
     if let Some(ref sys) = sys_prompt {
         est_prompt_tokens += estimate_tokens(sys);
         messages.push(serde_json::json!({ "role": "system", "content": sys }));
     }
-    messages.push(serde_json::json!({ "role": "user", "content": prompt }));
-
-    let mut body = serde_json::json!({
-        "model": target.model,
-        "messages": messages,
-        "stream": cfg.execution.stream,
-        "temperature": cfg.execution.temperature,
-        "top_p": cfg.execution.top_p,
-    });
-    if cfg.execution.max_tokens > 0 {
-        body["max_tokens"] = serde_json::json!(cfg.execution.max_tokens);
-    }
-    if let Some(seed) = cfg.execution.seed {
-        body["seed"] = serde_json::json!(seed);
-    }
-    if cfg.execution.stream {
-        body["stream_options"] = serde_json::json!({ "include_usage": true });
-    }
+    messages.push(serde_json::json!({ "role": "user", "content": effective_prompt }));
 
     let mut headers = HeaderMap::new();
-    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     if let Some(key) = provider.resolve_api_key() {
         if let Ok(val) = HeaderValue::from_str(&format!("Bearer {}", key)) {
             headers.insert(AUTHORIZATION, val);
@@ -443,11 +513,143 @@ async fn run_single_target(
     };
     let _ = tx.send(EngineEvent::Update(result.clone()));
 
-    let url = format!("{}/chat/completions", provider.base_url.trim_end_matches('/'));
+    let url = resolve_endpoint_url(&provider.base_url, endpoint_type, &cfg.execution.custom_endpoint);
     let timeout_dur = Duration::from_secs(cfg.execution.timeout_sec.clamp(5, 600));
+    let use_multipart = matches!(
+        endpoint_type,
+        EndpointType::AudioTranscriptions | EndpointType::AudioTranslations
+    ) || (endpoint_type == EndpointType::Custom && !matched_files.is_empty());
+
+    let request_builder = if use_multipart {
+        if matches!(
+            endpoint_type,
+            EndpointType::AudioTranscriptions | EndpointType::AudioTranslations
+        ) && matched_files.is_empty()
+        {
+            result.status = RunStatus::Error;
+            result.timing.total_ms = dispatched_at.elapsed().as_secs_f64() * 1000.0 + queue_ms;
+            result.error = Some(format!(
+                "Endpoint {} requires an enabled [[endpoint_files]] entry.",
+                endpoint_type.label()
+            ));
+            result.advice = Some(
+                "Add [[endpoint_files]] pointing to a local audio file in benchforge.toml.".to_string(),
+            );
+            let _ = tx.send(EngineEvent::Update(result));
+            return;
+        }
+
+        let mut loaded_files: Vec<(String, String, String, Vec<u8>)> = Vec::new();
+        for f in &matched_files {
+            match tokio::fs::read(&f.path).await {
+                Ok(bytes) => {
+                    let filename = std::path::Path::new(&f.path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("upload.bin")
+                        .to_string();
+                    let field = if f.field_name.trim().is_empty() {
+                        "file".to_string()
+                    } else {
+                        f.field_name.trim().to_string()
+                    };
+                    let mime = if f.mime_type.trim().is_empty() {
+                        "application/octet-stream".to_string()
+                    } else {
+                        f.mime_type.trim().to_string()
+                    };
+                    loaded_files.push((field, filename, mime, bytes));
+                }
+                Err(e) => {
+                    result.status = RunStatus::Error;
+                    result.timing.total_ms = dispatched_at.elapsed().as_secs_f64() * 1000.0 + queue_ms;
+                    result.error = Some(format!("Failed to read file '{}': {}", f.path, e));
+                    result.advice = Some("Verify [[endpoint_files]].path exists on disk.".to_string());
+                    let _ = tx.send(EngineEvent::Update(result));
+                    return;
+                }
+            }
+        }
+
+        let boundary = format!("----benchforgeBoundary{}", dispatched_at.elapsed().as_nanos());
+        if let Ok(val) = HeaderValue::from_str(&format!("multipart/form-data; boundary={}", boundary)) {
+            headers.insert(CONTENT_TYPE, val);
+        }
+        let mut fields: Vec<(&str, &str)> = vec![("model", &target.model)];
+        if !prompt.trim().is_empty() {
+            fields.push(("prompt", prompt.trim()));
+        }
+        let file_refs: Vec<(&str, &str, &str, &[u8])> = loaded_files
+            .iter()
+            .map(|(fld, name, mime, data)| (fld.as_str(), name.as_str(), mime.as_str(), data.as_slice()))
+            .collect();
+        let multipart_bytes = build_multipart_body(&boundary, &fields, &file_refs);
+        client.post(&url).headers(headers).body(multipart_bytes)
+    } else {
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let body = match endpoint_type {
+            EndpointType::AudioSpeech => {
+                let voice = if cfg.execution.tts_voice.trim().is_empty() {
+                    "alloy"
+                } else {
+                    cfg.execution.tts_voice.trim()
+                };
+                serde_json::json!({
+                    "model": target.model,
+                    "input": effective_prompt,
+                    "voice": voice,
+                })
+            }
+            EndpointType::Embeddings => serde_json::json!({
+                "model": target.model,
+                "input": effective_prompt,
+            }),
+            EndpointType::Responses => {
+                let mut payload = serde_json::json!({
+                    "model": target.model,
+                    "input": effective_prompt,
+                    "stream": false,
+                    "temperature": cfg.execution.temperature,
+                });
+                if let Some(ref sys) = sys_prompt {
+                    payload["instructions"] = serde_json::json!(sys);
+                }
+                if cfg.execution.max_tokens > 0 {
+                    payload["max_output_tokens"] = serde_json::json!(cfg.execution.max_tokens);
+                }
+                payload
+            }
+            EndpointType::Custom => serde_json::json!({
+                "model": target.model,
+                "input": effective_prompt,
+                "messages": messages,
+                "temperature": cfg.execution.temperature,
+            }),
+            _ => {
+                let mut payload = serde_json::json!({
+                    "model": target.model,
+                    "messages": messages,
+                    "stream": cfg.execution.stream,
+                    "temperature": cfg.execution.temperature,
+                    "top_p": cfg.execution.top_p,
+                });
+                if cfg.execution.max_tokens > 0 {
+                    payload["max_tokens"] = serde_json::json!(cfg.execution.max_tokens);
+                }
+                if let Some(seed) = cfg.execution.seed {
+                    payload["seed"] = serde_json::json!(seed);
+                }
+                if cfg.execution.stream {
+                    payload["stream_options"] = serde_json::json!({ "include_usage": true });
+                }
+                payload
+            }
+        };
+        client.post(&url).headers(headers).json(&body)
+    };
 
     let resp_res = tokio::select! {
-        r = tokio::time::timeout(timeout_dur, client.post(&url).headers(headers).json(&body).send()) => {
+        r = tokio::time::timeout(timeout_dur, request_builder.send()) => {
             match r {
                 Ok(inner) => inner,
                 Err(_) => {
@@ -497,7 +699,8 @@ async fn run_single_target(
         return;
     }
 
-    let is_sse = cfg.execution.stream
+    let is_sse = endpoint_type == EndpointType::ChatCompletions
+        && cfg.execution.stream
         && response
             .headers()
             .get(CONTENT_TYPE)
@@ -615,37 +818,119 @@ async fn run_single_target(
                 ((result.completion_tokens as f64 / denom_ms) * 1000.0 * 10.0).round() / 10.0;
         }
         let _ = tx.send(EngineEvent::Update(result));
-    } else {
-        let json_res = response.json::<SsePayload>().await;
+    } else if endpoint_type == EndpointType::AudioSpeech {
+        let resp_mime = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("audio/mpeg")
+            .to_string();
+        let bytes_res = response.bytes().await;
         let end = Instant::now();
         result.timing.ttfb_ms = Some(headers_at.duration_since(dispatched_at).as_secs_f64() * 1000.0);
         result.timing.download_ms = end.duration_since(headers_at).as_secs_f64() * 1000.0;
         result.timing.total_ms = end.duration_since(dispatched_at).as_secs_f64() * 1000.0 + queue_ms;
-        if let Ok(parsed) = json_res {
-            let text = parsed
-                .choices
-                .and_then(|c| c.into_iter().next())
-                .and_then(|c| c.message)
-                .and_then(|m| m.content)
-                .unwrap_or_default();
-            result.output = text;
-            if let Some(u) = parsed.usage {
-                result.prompt_tokens = u.prompt_tokens.unwrap_or(est_prompt_tokens);
-                result.completion_tokens =
-                    u.completion_tokens.unwrap_or_else(|| estimate_tokens(&result.output));
-                result.total_tokens =
-                    u.total_tokens.unwrap_or(result.prompt_tokens + result.completion_tokens);
-            } else {
-                result.completion_tokens = estimate_tokens(&result.output);
-                result.total_tokens = result.prompt_tokens + result.completion_tokens;
+        match bytes_res {
+            Ok(bytes) => {
+                let _ = tokio::fs::create_dir_all("exports").await;
+                let safe_id: String = target
+                    .id
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                    .collect();
+                let out_path = format!("exports/{}-speech.mp3", safe_id);
+                let saved_note = match tokio::fs::write(&out_path, &bytes).await {
+                    Ok(_) => format!(" -> saved {}", out_path),
+                    Err(_) => String::new(),
+                };
+                result.output = format!(
+                    "[Audio Speech Generated: {}, {} bytes{}]",
+                    resp_mime,
+                    bytes.len(),
+                    saved_note
+                );
+                result.status = RunStatus::Completed;
             }
-            let gen_ms = (result.timing.total_ms - queue_ms).max(1.0);
-            result.tokens_per_sec =
-                ((result.completion_tokens as f64 / gen_ms) * 1000.0 * 10.0).round() / 10.0;
-            result.status = RunStatus::Completed;
-        } else {
-            result.status = RunStatus::Error;
-            result.error = Some("Invalid JSON response from /chat/completions".to_string());
+            Err(e) => {
+                result.status = RunStatus::Error;
+                result.error = Some(format!("Failed reading binary audio response: {}", e));
+            }
+        }
+        let _ = tx.send(EngineEvent::Update(result));
+    } else {
+        let raw_text_res = response.text().await;
+        let end = Instant::now();
+        result.timing.ttfb_ms = Some(headers_at.duration_since(dispatched_at).as_secs_f64() * 1000.0);
+        result.timing.download_ms = end.duration_since(headers_at).as_secs_f64() * 1000.0;
+        result.timing.total_ms = end.duration_since(dispatched_at).as_secs_f64() * 1000.0 + queue_ms;
+        match raw_text_res {
+            Ok(raw_text) => {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw_text) {
+                    if let Some(chat_text) = val
+                        .get("choices")
+                        .and_then(|c| c.get(0))
+                        .and_then(|c0| c0.get("message"))
+                        .and_then(|m| m.get("content"))
+                        .and_then(|s| s.as_str())
+                    {
+                        result.output = chat_text.to_string();
+                    } else if let Some(resp_text) = val.get("output_text").and_then(|s| s.as_str()) {
+                        result.output = resp_text.to_string();
+                    } else if let Some(tr_text) = val.get("text").and_then(|s| s.as_str()) {
+                        result.output = tr_text.to_string();
+                    } else if let Some(emb) = val
+                        .get("data")
+                        .and_then(|d| d.get(0))
+                        .and_then(|d0| d0.get("embedding"))
+                        .and_then(|e| e.as_array())
+                    {
+                        let preview: Vec<String> = emb
+                            .iter()
+                            .take(8)
+                            .filter_map(|n| n.as_f64().map(|f| format!("{:.5}", f)))
+                            .collect();
+                        result.output = format!(
+                            "Embedding dimensions: {}\nPreview[0..8]: [{}]",
+                            emb.len(),
+                            preview.join(", ")
+                        );
+                    } else {
+                        result.output =
+                            serde_json::to_string_pretty(&val).unwrap_or(raw_text);
+                    }
+
+                    if let Some(u) = val.get("usage") {
+                        if let Some(pt) = u.get("prompt_tokens").and_then(|n| n.as_u64()) {
+                            result.prompt_tokens = pt;
+                        }
+                        if let Some(ct) = u.get("completion_tokens").and_then(|n| n.as_u64()) {
+                            result.completion_tokens = ct;
+                        } else {
+                            result.completion_tokens = estimate_tokens(&result.output);
+                        }
+                        result.total_tokens = u
+                            .get("total_tokens")
+                            .and_then(|n| n.as_u64())
+                            .unwrap_or(result.prompt_tokens + result.completion_tokens);
+                    } else {
+                        result.completion_tokens = estimate_tokens(&result.output);
+                        result.total_tokens = result.prompt_tokens + result.completion_tokens;
+                    }
+                    let gen_ms = (result.timing.total_ms - queue_ms).max(1.0);
+                    result.tokens_per_sec =
+                        ((result.completion_tokens as f64 / gen_ms) * 1000.0 * 10.0).round() / 10.0;
+                    result.status = RunStatus::Completed;
+                } else {
+                    result.output = raw_text;
+                    result.completion_tokens = estimate_tokens(&result.output);
+                    result.total_tokens = result.prompt_tokens + result.completion_tokens;
+                    result.status = RunStatus::Completed;
+                }
+            }
+            Err(e) => {
+                result.status = RunStatus::Error;
+                result.error = Some(format!("Failed reading endpoint response: {}", e));
+            }
         }
         let _ = tx.send(EngineEvent::Update(result));
     }

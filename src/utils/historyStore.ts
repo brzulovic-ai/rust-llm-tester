@@ -1,5 +1,6 @@
 import type {
   BenchmarkRunRecord,
+  EndpointFileAttachment,
   ProviderEndpoint,
   SupabaseConfig,
   TargetModel,
@@ -11,6 +12,12 @@ export const PROVIDERS_STORAGE_KEY = 'llm_workbench_providers_v1';
 export const TARGETS_STORAGE_KEY = 'llm_workbench_targets_v1';
 export const THEME_STORAGE_KEY = 'llm_workbench_theme_v1';
 export const SUPABASE_STORAGE_KEY = 'llm_workbench_supabase_v1';
+export const ENDPOINT_FILES_STORAGE_KEY = 'llm_workbench_endpoint_files_v1';
+export const FONT_SIZE_STORAGE_KEY = 'llm_workbench_font_size_v1';
+
+export const DEFAULT_FONT_SIZE = 16;
+export const MIN_FONT_SIZE = 12;
+export const MAX_FONT_SIZE = 22;
 
 export const MAX_HISTORY_RUNS = 50;
 
@@ -229,6 +236,29 @@ export function saveTheme(theme: ThemeId, storage: Storage = window.localStorage
   }
 }
 
+export function loadFontSize(storage: Storage = window.localStorage): number {
+  try {
+    const raw = storage.getItem(FONT_SIZE_STORAGE_KEY);
+    if (!raw) return DEFAULT_FONT_SIZE;
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed)) {
+      return Math.min(Math.max(Math.round(parsed), MIN_FONT_SIZE), MAX_FONT_SIZE);
+    }
+  } catch {
+    // Ignore
+  }
+  return DEFAULT_FONT_SIZE;
+}
+
+export function saveFontSize(fontSize: number, storage: Storage = window.localStorage): void {
+  try {
+    const clamped = Math.min(Math.max(Math.round(fontSize), MIN_FONT_SIZE), MAX_FONT_SIZE);
+    storage.setItem(FONT_SIZE_STORAGE_KEY, String(clamped));
+  } catch {
+    // Ignore
+  }
+}
+
 export const DEFAULT_SUPABASE_CONFIG: SupabaseConfig = {
   url: '',
   anonKey: '',
@@ -256,3 +286,26 @@ export function saveSupabaseConfig(
     // Ignore
   }
 }
+
+export function loadEndpointFiles(storage: Storage = window.localStorage): EndpointFileAttachment[] {
+  try {
+    const raw = storage.getItem(ENDPOINT_FILES_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveEndpointFiles(
+  files: EndpointFileAttachment[],
+  storage: Storage = window.localStorage
+): void {
+  try {
+    storage.setItem(ENDPOINT_FILES_STORAGE_KEY, JSON.stringify(files));
+  } catch {
+    // Ignore quota exceeded for large binary files; kept in memory for current session
+  }
+}
+

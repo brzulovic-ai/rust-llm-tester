@@ -4,15 +4,22 @@ import {
   ChevronRight,
   Cloud,
   Database,
+  FileAudio,
+  FileText,
+  Paperclip,
   Plus,
   RefreshCw,
   Server,
   Sparkles,
   Trash2,
+  Upload,
 } from 'lucide-react';
-import { PROMPT_SUITES, SYSTEM_PERSONAS } from '../data/promptSuites';
+import { PROMPT_SUITES, SYSTEM_PERSONAS, type PersonaCategory } from '../data/promptSuites';
 import type {
   BenchmarkRunRecord,
+  EndpointFileAttachment,
+  EndpointPayloadMode,
+  EndpointType,
   ExecutionConfig,
   ProviderEndpoint,
   ProviderKind,
@@ -21,6 +28,13 @@ import type {
   SystemPromptConfig,
   TargetModel,
 } from '../types/benchmark';
+import {
+  ENDPOINT_PRESETS,
+  filesForEndpoint,
+  formatBytes,
+  getEndpointPreset,
+  readFileAsAttachment,
+} from '../utils/endpointUtils';
 import { SUPABASE_TABLE_SQL } from '../utils/supabaseSync';
 
 export type AccordionSectionId = 'prompt' | 'config' | 'history';
@@ -34,6 +48,8 @@ interface SidebarAccordionProps {
   onSystemPromptChange: (next: SystemPromptConfig) => void;
   executionConfig: ExecutionConfig;
   onExecutionConfigChange: (next: ExecutionConfig) => void;
+  endpointFiles: EndpointFileAttachment[];
+  onEndpointFilesChange: (next: EndpointFileAttachment[]) => void;
   providers: ProviderEndpoint[];
   onProvidersChange: (next: ProviderEndpoint[]) => void;
   targets: TargetModel[];
@@ -69,6 +85,8 @@ export const SidebarAccordion: React.FC<SidebarAccordionProps> = ({
   onSystemPromptChange,
   executionConfig,
   onExecutionConfigChange,
+  endpointFiles,
+  onEndpointFilesChange,
   providers,
   onProvidersChange,
   targets,
@@ -92,9 +110,10 @@ export const SidebarAccordion: React.FC<SidebarAccordionProps> = ({
     history: false,
   });
 
-  const [suiteTab, setSuiteTab] = useState<'nerdy-kings' | 'html-games' | 'classic-benchmarks'>(
-    'nerdy-kings'
+  const [suiteTab, setSuiteTab] = useState<'systems-reasoning' | 'html-games' | 'classic-benchmarks'>(
+    'systems-reasoning'
   );
+  const [personaCategory, setPersonaCategory] = useState<'all' | PersonaCategory>('all');
   const [selectedProviderId, setSelectedProviderId] = useState<string>(
     () => providers[0]?.id ?? 'provider-gemini-builtin'
   );
@@ -103,6 +122,9 @@ export const SidebarAccordion: React.FC<SidebarAccordionProps> = ({
   const [headerKeyInput, setHeaderKeyInput] = useState('');
   const [headerValInput, setHeaderValInput] = useState('');
   const [copiedSql, setCopiedSql] = useState(false);
+  const [uploadScope, setUploadScope] = useState<'current' | EndpointType | 'all'>('current');
+  const [uploadFieldName, setUploadFieldName] = useState('file');
+  const [fileError, setFileError] = useState<string | null>(null);
 
   const toggleSection = (id: AccordionSectionId) => {
     setOpenSections((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -212,6 +234,40 @@ export const SidebarAccordion: React.FC<SidebarAccordionProps> = ({
   };
 
   const filteredSuitePrompts = PROMPT_SUITES.filter((s) => s.suite === suiteTab);
+  const filteredPersonas =
+    personaCategory === 'all'
+      ? SYSTEM_PERSONAS
+      : SYSTEM_PERSONAS.filter((p) => p.category === personaCategory);
+
+  const activeEndpointType: EndpointType = executionConfig.endpointType ?? 'chat-completions';
+  const activePreset = getEndpointPreset(activeEndpointType);
+  const matchedEndpointFiles = filesForEndpoint(endpointFiles, activeEndpointType);
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+    setFileError(null);
+    const resolvedScope: EndpointType | 'all' =
+      uploadScope === 'current' ? activeEndpointType : uploadScope;
+    try {
+      const uploaded: EndpointFileAttachment[] = [];
+      for (const f of Array.from(fileList)) {
+        if (f.size > 35 * 1024 * 1024) {
+          setFileError(`Skipped ${f.name}: exceeds 35 MB limit.`);
+          continue;
+        }
+        uploaded.push(await readFileAsAttachment(f, resolvedScope, uploadFieldName));
+      }
+      if (uploaded.length > 0) {
+        onEndpointFilesChange([...endpointFiles, ...uploaded]);
+      }
+    } catch (err: unknown) {
+      const msg = (err as { message?: string })?.message || 'Failed to read selected file';
+      setFileError(msg);
+    } finally {
+      e.target.value = '';
+    }
+  };
 
   return (
     <div className="h-full flex flex-col divide-y overflow-y-auto" style={{ borderColor: 'var(--border-subtle)' }}>
@@ -301,9 +357,38 @@ export const SidebarAccordion: React.FC<SidebarAccordionProps> = ({
                 </select>
               </div>
 
+              {/* Persona Category Filter */}
+              <div className="flex flex-wrap gap-1" role="group" aria-label="System persona category">
+                {(
+                  [
+                    { id: 'all', label: 'All (9)' },
+                    { id: 'engineering', label: 'Engineering' },
+                    { id: 'daily', label: 'Daily Use' },
+                    { id: 'devops', label: 'DevOps / SRE' },
+                  ] as const
+                ).map((cat) => {
+                  const selected = personaCategory === cat.id;
+                  return (
+                    <button
+                      key={cat.id}
+                      type="button"
+                      onClick={() => setPersonaCategory(cat.id)}
+                      className="px-2 py-0.5 rounded border text-[10px] font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                      style={{
+                        borderColor: selected ? 'var(--accent-primary)' : 'var(--border-subtle)',
+                        backgroundColor: selected ? 'var(--accent-soft)' : 'transparent',
+                        color: selected ? 'var(--accent-primary)' : 'var(--text-muted)',
+                      }}
+                    >
+                      {cat.label}
+                    </button>
+                  );
+                })}
+              </div>
+
               {/* Built-in Personas */}
               <div className="flex flex-wrap gap-1.5">
-                {SYSTEM_PERSONAS.map((persona) => {
+                {filteredPersonas.map((persona) => {
                   const active = systemPrompt.personaId === persona.id && systemPrompt.enabled;
                   return (
                     <button
@@ -403,14 +488,14 @@ export const SidebarAccordion: React.FC<SidebarAccordionProps> = ({
               >
                 <button
                   type="button"
-                  onClick={() => setSuiteTab('nerdy-kings')}
+                  onClick={() => setSuiteTab('systems-reasoning')}
                   className="px-2 py-1 rounded text-[11px] font-medium cursor-pointer truncate"
                   style={{
-                    backgroundColor: suiteTab === 'nerdy-kings' ? 'var(--bg-surface)' : 'transparent',
-                    color: suiteTab === 'nerdy-kings' ? 'var(--text-primary)' : 'var(--text-muted)',
+                    backgroundColor: suiteTab === 'systems-reasoning' ? 'var(--bg-surface)' : 'transparent',
+                    color: suiteTab === 'systems-reasoning' ? 'var(--text-primary)' : 'var(--text-muted)',
                   }}
                 >
-                  Nerdy Kings (18)
+                  Systems &amp; Reasoning (18)
                 </button>
                 <button
                   type="button"
@@ -544,17 +629,43 @@ export const SidebarAccordion: React.FC<SidebarAccordionProps> = ({
               </div>
 
               {executionConfig.mode === 'parallel' && (
-                <div className="space-y-1">
-                  <div className="flex justify-between text-xs">
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs gap-2">
                     <span style={{ color: 'var(--text-secondary)' }}>Concurrent Workers</span>
-                    <span className="font-mono tabular-nums" style={{ color: 'var(--text-primary)' }}>
-                      {executionConfig.concurrency} threads
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="number"
+                        aria-label="Concurrent workers count"
+                        min={1}
+                        max={100}
+                        value={executionConfig.concurrency}
+                        onChange={(e) => {
+                          const parsed = Number(e.target.value);
+                          const clamped = Number.isFinite(parsed)
+                            ? Math.min(Math.max(Math.round(parsed), 1), 100)
+                            : 1;
+                          onExecutionConfigChange({
+                            ...executionConfig,
+                            concurrency: clamped,
+                          });
+                        }}
+                        className="w-16 px-1.5 py-0.5 rounded border font-mono text-xs text-right tabular-nums"
+                        style={{
+                          borderColor: 'var(--border-subtle)',
+                          backgroundColor: 'var(--bg-surface)',
+                          color: 'var(--text-primary)',
+                        }}
+                      />
+                      <span className="font-mono text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                        / 100 threads
+                      </span>
+                    </div>
                   </div>
                   <input
                     type="range"
+                    aria-label="Concurrent workers slider"
                     min={1}
-                    max={10}
+                    max={100}
                     value={executionConfig.concurrency}
                     onChange={(e) =>
                       onExecutionConfigChange({
@@ -566,6 +677,120 @@ export const SidebarAccordion: React.FC<SidebarAccordionProps> = ({
                   />
                 </div>
               )}
+
+              {/* Endpoint Type Selector */}
+              <div className="space-y-2 pt-1 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
+                <label className="block space-y-1 text-xs">
+                  <span className="font-medium" style={{ color: 'var(--text-secondary)' }}>
+                    Endpoint Type
+                  </span>
+                  <select
+                    aria-label="Endpoint type"
+                    value={activeEndpointType}
+                    onChange={(e) =>
+                      onExecutionConfigChange({
+                        ...executionConfig,
+                        endpointType: e.target.value as EndpointType,
+                      })
+                    }
+                    className="w-full px-2 py-1.5 rounded border text-xs"
+                    style={{
+                      borderColor: 'var(--border-subtle)',
+                      backgroundColor: 'var(--bg-surface)',
+                      color: 'var(--text-primary)',
+                    }}
+                  >
+                    {ENDPOINT_PRESETS.map((ep) => (
+                      <option key={ep.id} value={ep.id}>
+                        {ep.label} ({ep.pathLabel})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <p className="text-[11px] leading-snug" style={{ color: 'var(--text-muted)' }}>
+                  {activePreset.description}
+                </p>
+
+                {activeEndpointType === 'custom' && (
+                  <div className="grid grid-cols-1 gap-2 text-xs">
+                    <label className="block space-y-1">
+                      <span style={{ color: 'var(--text-muted)' }}>Custom Path or Full URL</span>
+                      <input
+                        type="text"
+                        aria-label="Custom endpoint path or URL"
+                        value={executionConfig.customEndpoint ?? ''}
+                        onChange={(e) =>
+                          onExecutionConfigChange({
+                            ...executionConfig,
+                            customEndpoint: e.target.value,
+                          })
+                        }
+                        placeholder="/v1/rerank or https://api.example.com/v1/..."
+                        className="w-full px-2 py-1.5 rounded border font-mono text-[11px]"
+                        style={{
+                          borderColor: 'var(--border-subtle)',
+                          backgroundColor: 'var(--bg-surface)',
+                          color: 'var(--text-primary)',
+                        }}
+                      />
+                    </label>
+
+                    <label className="block space-y-1">
+                      <span style={{ color: 'var(--text-muted)' }}>Custom Payload Mode</span>
+                      <select
+                        aria-label="Custom endpoint payload mode"
+                        value={executionConfig.customPayloadMode ?? 'auto'}
+                        onChange={(e) =>
+                          onExecutionConfigChange({
+                            ...executionConfig,
+                            customPayloadMode: e.target.value as EndpointPayloadMode,
+                          })
+                        }
+                        className="w-full px-2 py-1 rounded border text-xs"
+                        style={{
+                          borderColor: 'var(--border-subtle)',
+                          backgroundColor: 'var(--bg-surface)',
+                          color: 'var(--text-primary)',
+                        }}
+                      >
+                        <option value="auto">Auto (Multipart if files attached, else JSON)</option>
+                        <option value="json">JSON Body</option>
+                        <option value="multipart">Multipart FormData (File Upload)</option>
+                      </select>
+                    </label>
+                  </div>
+                )}
+
+                {activeEndpointType === 'audio-speech' && (
+                  <label className="block space-y-1 text-xs">
+                    <span style={{ color: 'var(--text-muted)' }}>TTS Voice</span>
+                    <select
+                      aria-label="TTS voice"
+                      value={executionConfig.ttsVoice ?? 'alloy'}
+                      onChange={(e) =>
+                        onExecutionConfigChange({
+                          ...executionConfig,
+                          ttsVoice: e.target.value,
+                        })
+                      }
+                      className="w-full px-2 py-1 rounded border text-xs"
+                      style={{
+                        borderColor: 'var(--border-subtle)',
+                        backgroundColor: 'var(--bg-surface)',
+                        color: 'var(--text-primary)',
+                      }}
+                    >
+                      <option value="alloy">alloy</option>
+                      <option value="echo">echo</option>
+                      <option value="fable">fable</option>
+                      <option value="onyx">onyx</option>
+                      <option value="nova">nova</option>
+                      <option value="shimmer">shimmer</option>
+                    </select>
+                  </label>
+                )}
+              </div>
 
               <div className="grid grid-cols-2 gap-2 text-xs">
                 <label className="space-y-1">
@@ -646,6 +871,243 @@ export const SidebarAccordion: React.FC<SidebarAccordionProps> = ({
                   <span>SSE Stream</span>
                 </label>
               </div>
+            </div>
+
+            {/* Endpoint File Handling & Management */}
+            <div
+              className="rounded-lg border p-3 space-y-2.5"
+              style={{ borderColor: 'var(--border-subtle)', backgroundColor: 'var(--bg-elevated)' }}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 text-xs font-semibold" style={{ color: 'var(--text-primary)' }}>
+                  <Paperclip className="w-3.5 h-3.5" style={{ color: 'var(--accent-primary)' }} />
+                  <span>Endpoint File Manager</span>
+                </span>
+                <span className="text-[11px] font-mono tabular-nums" style={{ color: 'var(--text-muted)' }}>
+                  {matchedEndpointFiles.length} active
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <label className="space-y-1">
+                  <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                    Target Scope
+                  </span>
+                  <select
+                    aria-label="Upload file endpoint scope"
+                    value={uploadScope}
+                    onChange={(e) =>
+                      setUploadScope(e.target.value as 'current' | EndpointType | 'all')
+                    }
+                    className="w-full px-2 py-1 rounded border text-[11px]"
+                    style={{
+                      borderColor: 'var(--border-subtle)',
+                      backgroundColor: 'var(--bg-surface)',
+                      color: 'var(--text-primary)',
+                    }}
+                  >
+                    <option value="current">Current ({activePreset.pathLabel})</option>
+                    <option value="all">All Endpoints</option>
+                    {ENDPOINT_PRESETS.map((ep) => (
+                      <option key={ep.id} value={ep.id}>
+                        {ep.pathLabel}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="space-y-1">
+                  <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                    Form Field Name
+                  </span>
+                  <input
+                    type="text"
+                    aria-label="Multipart form field name"
+                    value={uploadFieldName}
+                    onChange={(e) => setUploadFieldName(e.target.value)}
+                    placeholder="file"
+                    className="w-full px-2 py-1 rounded border font-mono text-[11px]"
+                    style={{
+                      borderColor: 'var(--border-subtle)',
+                      backgroundColor: 'var(--bg-surface)',
+                      color: 'var(--text-primary)',
+                    }}
+                  />
+                </label>
+              </div>
+
+              <div className="flex items-center justify-between gap-2">
+                <label
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded border text-xs font-medium cursor-pointer"
+                  style={{
+                    borderColor: 'var(--border-subtle)',
+                    backgroundColor: 'var(--bg-surface)',
+                    color: 'var(--text-primary)',
+                  }}
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>Attach File(s)</span>
+                  <input
+                    type="file"
+                    multiple
+                    accept={activePreset.acceptHint || '*/*'}
+                    aria-label="Attach files for endpoint"
+                    onChange={handleFileUpload}
+                    className="hidden"
+                  />
+                </label>
+
+                {endpointFiles.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => onEndpointFilesChange([])}
+                    className="text-[11px] hover:underline cursor-pointer"
+                    style={{ color: 'var(--status-error)' }}
+                  >
+                    Clear Files
+                  </button>
+                )}
+              </div>
+
+              {activePreset.requiresFile && matchedEndpointFiles.length === 0 && (
+                <p className="text-[11px]" style={{ color: 'var(--status-warning)' }}>
+                  Attach an audio file for {activePreset.pathLabel} before running.
+                </p>
+              )}
+
+              {fileError && (
+                <p className="text-[11px]" style={{ color: 'var(--status-error)' }}>
+                  {fileError}
+                </p>
+              )}
+
+              {endpointFiles.length === 0 ? (
+                <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                  No files attached yet. Scope files to /v1/audio/* for multipart uploads or to chat/responses/custom endpoints for context injection.
+                </p>
+              ) : (
+                <div
+                  className="rounded border divide-y max-h-48 overflow-y-auto"
+                  style={{ borderColor: 'var(--border-subtle)', backgroundColor: 'var(--bg-canvas)' }}
+                >
+                  {endpointFiles.map((file) => {
+                    const isAudio = file.mimeType.startsWith('audio/');
+                    const matchesCurrent =
+                      file.enabled &&
+                      (file.endpointScope === activeEndpointType || file.endpointScope === 'all');
+                    return (
+                      <div
+                        key={file.id}
+                        className="p-2 space-y-1.5 text-xs"
+                        style={{ borderColor: 'var(--border-subtle)' }}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <label className="flex items-center gap-1.5 min-w-0 cursor-pointer flex-1">
+                            <input
+                              type="checkbox"
+                              checked={file.enabled}
+                              onChange={(e) =>
+                                onEndpointFilesChange(
+                                  endpointFiles.map((f) =>
+                                    f.id === file.id ? { ...f, enabled: e.target.checked } : f
+                                  )
+                                )
+                              }
+                            />
+                            {isAudio ? (
+                              <FileAudio className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--accent-primary)' }} />
+                            ) : (
+                              <FileText className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--text-secondary)' }} />
+                            )}
+                            <span className="font-mono text-[11px] truncate" style={{ color: 'var(--text-primary)' }}>
+                              {file.name}
+                            </span>
+                          </label>
+                          <span
+                            className="text-[10px] font-mono tabular-nums shrink-0"
+                            style={{ color: matchesCurrent ? 'var(--status-success)' : 'var(--text-muted)' }}
+                          >
+                            {formatBytes(file.sizeBytes)}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onEndpointFilesChange(endpointFiles.filter((f) => f.id !== file.id))
+                            }
+                            aria-label={`Remove file ${file.name}`}
+                            className="p-0.5 opacity-60 hover:opacity-100 cursor-pointer"
+                            style={{ color: 'var(--text-muted)' }}
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-1.5 text-[11px]">
+                          <select
+                            aria-label={`Endpoint scope for ${file.name}`}
+                            value={file.endpointScope}
+                            onChange={(e) =>
+                              onEndpointFilesChange(
+                                endpointFiles.map((f) =>
+                                  f.id === file.id
+                                    ? { ...f, endpointScope: e.target.value as EndpointType | 'all' }
+                                    : f
+                                )
+                              )
+                            }
+                            className="px-1.5 py-0.5 rounded border text-[11px]"
+                            style={{
+                              borderColor: 'var(--border-subtle)',
+                              backgroundColor: 'var(--bg-surface)',
+                              color: 'var(--text-secondary)',
+                            }}
+                          >
+                            <option value="all">All Endpoints</option>
+                            {ENDPOINT_PRESETS.map((ep) => (
+                              <option key={ep.id} value={ep.id}>
+                                {ep.pathLabel}
+                              </option>
+                            ))}
+                          </select>
+
+                          <input
+                            type="text"
+                            aria-label={`Field name for ${file.name}`}
+                            value={file.fieldName}
+                            onChange={(e) =>
+                              onEndpointFilesChange(
+                                endpointFiles.map((f) =>
+                                  f.id === file.id ? { ...f, fieldName: e.target.value } : f
+                                )
+                              )
+                            }
+                            placeholder="field (e.g. file)"
+                            className="px-1.5 py-0.5 rounded border font-mono text-[11px]"
+                            style={{
+                              borderColor: 'var(--border-subtle)',
+                              backgroundColor: 'var(--bg-surface)',
+                              color: 'var(--text-secondary)',
+                            }}
+                          />
+                        </div>
+
+                        {file.textPreview && (
+                          <pre
+                            className="p-1.5 rounded border text-[10px] font-mono max-h-14 overflow-hidden whitespace-pre-wrap"
+                            style={{
+                              borderColor: 'var(--border-subtle)',
+                              backgroundColor: 'var(--bg-surface)',
+                              color: 'var(--text-muted)',
+                            }}
+                          >
+                            {file.textPreview.slice(0, 180)}
+                          </pre>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             {/* Active Target Models */}

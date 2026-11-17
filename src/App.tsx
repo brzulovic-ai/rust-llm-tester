@@ -20,6 +20,7 @@ import { WaterfallView } from './components/WaterfallView';
 import { PROMPT_SUITES } from './data/promptSuites';
 import type {
   BenchmarkRunRecord,
+  EndpointFileAttachment,
   ExecutionConfig,
   ModelRunResult,
   ProviderEndpoint,
@@ -30,16 +31,24 @@ import type {
   ThemeId,
   WorkspaceView,
 } from './types/benchmark';
+import { filesForEndpoint, getEndpointPreset } from './utils/endpointUtils';
 import { executeSingleTarget, runExecutionPool } from './utils/executionEngine';
 import { buildCsvExport, buildJsonExport, triggerFileDownload } from './utils/exportUtils';
 import {
   clearHistory,
+  DEFAULT_FONT_SIZE,
   deleteRunFromHistory,
+  loadEndpointFiles,
+  loadFontSize,
   loadHistory,
   loadProviders,
   loadSupabaseConfig,
   loadTargets,
   loadTheme,
+  MAX_FONT_SIZE,
+  MIN_FONT_SIZE,
+  saveEndpointFiles,
+  saveFontSize,
   saveProviders,
   saveRunToHistory,
   saveSupabaseConfig,
@@ -64,12 +73,14 @@ const THEME_OPTIONS: Array<{ id: ThemeId; label: string }> = [
 
 export default function App() {
   const [theme, setTheme] = useState<ThemeId>(() => loadTheme());
+  const [fontSize, setFontSize] = useState<number>(() => loadFontSize());
   const [activeView, setActiveView] = useState<WorkspaceView>('cards');
   const [sidebarWidth, setSidebarWidth] = useState<number>(360);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState<boolean>(false);
 
   const [providers, setProviders] = useState<ProviderEndpoint[]>(() => loadProviders());
   const [targets, setTargets] = useState<TargetModel[]>(() => loadTargets());
+  const [endpointFiles, setEndpointFiles] = useState<EndpointFileAttachment[]>(() => loadEndpointFiles());
   const [history, setHistory] = useState<BenchmarkRunRecord[]>(() => loadHistory());
   const [supabaseConfig, setSupabaseConfig] = useState<SupabaseConfig>(() => loadSupabaseConfig());
   const [syncLogs, setSyncLogs] = useState<SyncLogEntry[]>([]);
@@ -95,6 +106,10 @@ export default function App() {
     temperature: 0.7,
     maxTokens: 2048,
     topP: 1,
+    endpointType: 'chat-completions',
+    customEndpoint: '',
+    customPayloadMode: 'auto',
+    ttsVoice: 'alloy',
   });
 
   const [resultsMap, setResultsMap] = useState<Record<string, ModelRunResult>>({});
@@ -118,6 +133,13 @@ export default function App() {
     saveTheme(theme);
   }, [theme]);
 
+  // Sync root font size to documentElement
+  useEffect(() => {
+    const clamped = Math.min(Math.max(Math.round(fontSize), MIN_FONT_SIZE), MAX_FONT_SIZE);
+    document.documentElement.style.fontSize = `${clamped}px`;
+    saveFontSize(clamped);
+  }, [fontSize]);
+
   // Persist providers, targets, and supabase config
   useEffect(() => {
     saveProviders(providers);
@@ -126,6 +148,10 @@ export default function App() {
   useEffect(() => {
     saveTargets(targets);
   }, [targets]);
+
+  useEffect(() => {
+    saveEndpointFiles(endpointFiles);
+  }, [endpointFiles]);
 
   useEffect(() => {
     saveSupabaseConfig(supabaseConfig);
@@ -169,6 +195,16 @@ export default function App() {
   }, []);
 
   const enabledTargets = useMemo(() => targets.filter((t) => t.enabled), [targets]);
+  const activeEndpointType = executionConfig.endpointType ?? 'chat-completions';
+  const activeEndpointPreset = getEndpointPreset(activeEndpointType);
+  const matchingEndpointFiles = useMemo(
+    () => filesForEndpoint(endpointFiles, activeEndpointType),
+    [endpointFiles, activeEndpointType]
+  );
+  const canStartRun =
+    enabledTargets.length > 0 &&
+    (Boolean(prompt.trim()) ||
+      (activeEndpointPreset.requiresFile && matchingEndpointFiles.length > 0));
 
   const orderedResults = useMemo(() => {
     const list: ModelRunResult[] = [];
@@ -234,7 +270,7 @@ export default function App() {
       return;
     }
 
-    if (!prompt.trim() || enabledTargets.length === 0) return;
+    if (!canStartRun) return;
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
@@ -247,6 +283,7 @@ export default function App() {
       prompt,
       systemPrompt,
       executionConfig,
+      endpointFiles,
       signal: controller.signal,
       onResultUpdate: (targetId, partial) => {
         setResultsMap((prev) => ({ ...prev, [targetId]: partial }));
@@ -270,6 +307,7 @@ export default function App() {
       prompt,
       systemPrompt,
       executionConfig,
+      endpointFiles,
       enqueuedAt: performance.now(),
       signal: controller.signal,
       onUpdate: (partial) => {
@@ -298,6 +336,7 @@ export default function App() {
       prompt,
       systemPrompt,
       executionConfig,
+      endpointFiles,
       signal: controller.signal,
       onResultUpdate: (targetId, partial) => {
         setResultsMap((prev) => ({ ...prev, [targetId]: partial }));
@@ -478,7 +517,7 @@ export default function App() {
           <button
             type="button"
             onClick={handleRunBenchmark}
-            disabled={!isRunning && (!prompt.trim() || enabledTargets.length === 0)}
+            disabled={!isRunning && !canStartRun}
             className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-colors cursor-pointer disabled:opacity-40 whitespace-nowrap shrink-0"
             style={{
               backgroundColor: isRunning ? 'var(--status-error)' : 'var(--accent-primary)',
@@ -522,6 +561,8 @@ export default function App() {
             onSystemPromptChange={setSystemPrompt}
             executionConfig={executionConfig}
             onExecutionConfigChange={setExecutionConfig}
+            endpointFiles={endpointFiles}
+            onEndpointFilesChange={setEndpointFiles}
             providers={providers}
             onProvidersChange={setProviders}
             targets={targets}
@@ -577,6 +618,15 @@ export default function App() {
               <span style={{ color: 'var(--text-muted)' }}>
                 {enabledTargets.length} targets ({executionConfig.mode}
                 {executionConfig.mode === 'parallel' ? ` ×${executionConfig.concurrency}` : ''})
+              </span>
+              <span style={{ color: 'var(--text-muted)' }} aria-hidden="true">
+                ·
+              </span>
+              <span style={{ color: 'var(--text-secondary)' }}>
+                {activeEndpointType === 'custom' && executionConfig.customEndpoint?.trim()
+                  ? executionConfig.customEndpoint.trim()
+                  : activeEndpointPreset.pathLabel}
+                {matchingEndpointFiles.length > 0 ? ` (${matchingEndpointFiles.length} files)` : ''}
               </span>
               {completedResults.length > 0 && (
                 <>
@@ -740,6 +790,52 @@ export default function App() {
                   </option>
                 ))}
               </select>
+
+              <div
+                className="inline-flex items-center rounded-md border overflow-hidden shrink-0"
+                style={{
+                  borderColor: 'var(--border-subtle)',
+                  backgroundColor: 'var(--bg-elevated)',
+                }}
+                role="group"
+                aria-label="Font size controls"
+              >
+                <button
+                  type="button"
+                  aria-label="Decrease font size"
+                  title="Decrease font size"
+                  disabled={fontSize <= MIN_FONT_SIZE}
+                  onClick={() => setFontSize((prev) => Math.max(MIN_FONT_SIZE, prev - 1))}
+                  className="px-2 py-1.5 text-xs font-medium cursor-pointer disabled:opacity-40 whitespace-nowrap hover:opacity-80 transition-opacity"
+                  style={{ color: 'var(--text-primary)' }}
+                >
+                  A-
+                </button>
+                <button
+                  type="button"
+                  aria-label="Reset font size"
+                  title={`Font size ${fontSize}px (click to reset to ${DEFAULT_FONT_SIZE}px)`}
+                  onClick={() => setFontSize(DEFAULT_FONT_SIZE)}
+                  className="px-2 py-1.5 text-[11px] font-mono tabular-nums border-x cursor-pointer whitespace-nowrap"
+                  style={{
+                    borderColor: 'var(--border-subtle)',
+                    color: 'var(--text-secondary)',
+                  }}
+                >
+                  {fontSize}px
+                </button>
+                <button
+                  type="button"
+                  aria-label="Increase font size"
+                  title="Increase font size"
+                  disabled={fontSize >= MAX_FONT_SIZE}
+                  onClick={() => setFontSize((prev) => Math.min(MAX_FONT_SIZE, prev + 1))}
+                  className="px-2 py-1.5 text-xs font-medium cursor-pointer disabled:opacity-40 whitespace-nowrap hover:opacity-80 transition-opacity"
+                  style={{ color: 'var(--text-primary)' }}
+                >
+                  A+
+                </button>
+              </div>
             </div>
           </div>
 
@@ -794,6 +890,7 @@ export default function App() {
         supabaseConfig={supabaseConfig}
         providers={providers}
         targets={targets}
+        endpointFiles={endpointFiles}
         results={orderedResults}
         prompt={prompt}
       />

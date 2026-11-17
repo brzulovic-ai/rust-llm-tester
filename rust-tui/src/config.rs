@@ -56,6 +56,74 @@ pub enum ExecutionMode {
     Sequential,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EndpointType {
+    ChatCompletions,
+    AudioTranscriptions,
+    AudioTranslations,
+    AudioSpeech,
+    Embeddings,
+    Responses,
+    Custom,
+}
+
+impl Default for EndpointType {
+    fn default() -> Self {
+        EndpointType::ChatCompletions
+    }
+}
+
+impl EndpointType {
+    pub fn next(self) -> Self {
+        match self {
+            EndpointType::ChatCompletions => EndpointType::AudioTranscriptions,
+            EndpointType::AudioTranscriptions => EndpointType::AudioTranslations,
+            EndpointType::AudioTranslations => EndpointType::AudioSpeech,
+            EndpointType::AudioSpeech => EndpointType::Embeddings,
+            EndpointType::Embeddings => EndpointType::Responses,
+            EndpointType::Responses => EndpointType::Custom,
+            EndpointType::Custom => EndpointType::ChatCompletions,
+        }
+    }
+
+    pub fn as_id(self) -> &'static str {
+        match self {
+            EndpointType::ChatCompletions => "chat-completions",
+            EndpointType::AudioTranscriptions => "audio-transcriptions",
+            EndpointType::AudioTranslations => "audio-translations",
+            EndpointType::AudioSpeech => "audio-speech",
+            EndpointType::Embeddings => "embeddings",
+            EndpointType::Responses => "responses",
+            EndpointType::Custom => "custom",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            EndpointType::ChatCompletions => "/v1/chat/completions",
+            EndpointType::AudioTranscriptions => "/v1/audio/transcriptions",
+            EndpointType::AudioTranslations => "/v1/audio/translations",
+            EndpointType::AudioSpeech => "/v1/audio/speech",
+            EndpointType::Embeddings => "/v1/embeddings",
+            EndpointType::Responses => "/v1/responses",
+            EndpointType::Custom => "Custom Endpoint",
+        }
+    }
+
+    pub fn suffix(self) -> &'static str {
+        match self {
+            EndpointType::ChatCompletions => "/chat/completions",
+            EndpointType::AudioTranscriptions => "/audio/transcriptions",
+            EndpointType::AudioTranslations => "/audio/translations",
+            EndpointType::AudioSpeech => "/audio/speech",
+            EndpointType::Embeddings => "/embeddings",
+            EndpointType::Responses => "/responses",
+            EndpointType::Custom => "",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ExecutionConfig {
@@ -67,6 +135,9 @@ pub struct ExecutionConfig {
     pub max_tokens: u32,
     pub top_p: f32,
     pub seed: Option<u64>,
+    pub endpoint_type: EndpointType,
+    pub custom_endpoint: String,
+    pub tts_voice: String,
 }
 
 impl Default for ExecutionConfig {
@@ -80,6 +151,9 @@ impl Default for ExecutionConfig {
             max_tokens: 2048,
             top_p: 1.0,
             seed: None,
+            endpoint_type: EndpointType::ChatCompletions,
+            custom_endpoint: String::new(),
+            tts_voice: "alloy".to_string(),
         }
     }
 }
@@ -271,6 +345,30 @@ impl Default for SubgroupConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct EndpointFileConfig {
+    pub id: String,
+    pub path: String,
+    pub mime_type: String,
+    pub endpoint_type: String,
+    pub field_name: String,
+    pub enabled: bool,
+}
+
+impl Default for EndpointFileConfig {
+    fn default() -> Self {
+        Self {
+            id: "file-default".to_string(),
+            path: String::new(),
+            mime_type: "application/octet-stream".to_string(),
+            endpoint_type: "all".to_string(),
+            field_name: "file".to_string(),
+            enabled: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BenchConfig {
@@ -281,6 +379,7 @@ pub struct BenchConfig {
     pub providers: Vec<ProviderConfig>,
     pub targets: Vec<TargetConfig>,
     pub subgroups: Vec<SubgroupConfig>,
+    pub endpoint_files: Vec<EndpointFileConfig>,
 }
 
 impl Default for BenchConfig {
@@ -412,6 +511,7 @@ impl Default for BenchConfig {
                 },
             ],
             subgroups: Vec::new(),
+            endpoint_files: Vec::new(),
         }
     }
 }
@@ -488,7 +588,7 @@ impl BenchConfig {
         }
         if let Ok(conc_raw) = env::var("BENCHFORGE_CONCURRENCY") {
             if let Ok(val) = conc_raw.parse::<usize>() {
-                self.execution.concurrency = val.clamp(1, 10);
+                self.execution.concurrency = val.clamp(1, 100);
             }
         }
         if let Ok(timeout_raw) = env::var("BENCHFORGE_TIMEOUT") {
@@ -499,9 +599,9 @@ impl BenchConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if !(1..=10).contains(&self.execution.concurrency) {
+        if !(1..=100).contains(&self.execution.concurrency) {
             bail!(
-                "execution.concurrency must be between 1 and 10 (got {})",
+                "execution.concurrency must be between 1 and 100 (got {})",
                 self.execution.concurrency
             );
         }
@@ -563,6 +663,18 @@ impl BenchConfig {
 
     pub fn enabled_targets(&self) -> Vec<&TargetConfig> {
         self.targets.iter().filter(|t| t.enabled).collect()
+    }
+
+    pub fn matching_endpoint_files(&self) -> Vec<&EndpointFileConfig> {
+        let active_id = self.execution.endpoint_type.as_id();
+        self.endpoint_files
+            .iter()
+            .filter(|f| {
+                f.enabled
+                    && !f.path.trim().is_empty()
+                    && (f.endpoint_type == "all" || f.endpoint_type == active_id)
+            })
+            .collect()
     }
 
     pub fn provider_target_counts(&self, provider_id: &str) -> (usize, usize) {
@@ -821,8 +933,11 @@ mod tests {
     #[test]
     fn rejects_invalid_concurrency_and_missing_provider() {
         let mut cfg = BenchConfig::default();
-        cfg.execution.concurrency = 15;
+        cfg.execution.concurrency = 150;
         assert!(cfg.validate().is_err());
+
+        cfg.execution.concurrency = 100;
+        assert!(cfg.validate().is_ok());
 
         cfg.execution.concurrency = 3;
         cfg.targets.push(TargetConfig {
@@ -947,5 +1062,28 @@ mod tests {
         let removed = cfg.delete_subgroup(&saved_id).expect("delete");
         assert_eq!(removed.name, "Groq Fast");
         assert!(cfg.subgroups.is_empty());
+    }
+
+    #[test]
+    fn supports_endpoint_type_and_endpoint_files_roundtrip() {
+        let mut cfg = BenchConfig::default();
+        cfg.execution.concurrency = 100;
+        cfg.execution.endpoint_type = EndpointType::AudioTranscriptions;
+        cfg.endpoint_files.push(EndpointFileConfig {
+            id: "f-audio".into(),
+            path: "/tmp/sample.mp3".into(),
+            mime_type: "audio/mpeg".into(),
+            endpoint_type: "audio-transcriptions".into(),
+            field_name: "file".into(),
+            enabled: true,
+        });
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.matching_endpoint_files().len(), 1);
+
+        let toml_str = toml::to_string_pretty(&cfg).expect("serialize");
+        let decoded: BenchConfig = toml::from_str(&toml_str).expect("deserialize");
+        assert_eq!(decoded.execution.concurrency, 100);
+        assert_eq!(decoded.execution.endpoint_type, EndpointType::AudioTranscriptions);
+        assert_eq!(decoded.endpoint_files.len(), 1);
     }
 }

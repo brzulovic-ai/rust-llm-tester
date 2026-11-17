@@ -33,14 +33,16 @@ The platform ships two synchronized interfaces backed by compatible execution se
 ## 4. Functional Requirements — Web Workbench
 
 ### 4.1 Multi-Model Inference & Execution Engine
-- **Sequential & Parallel Execution**: Sequential queue or parallel worker pool (`1–10` threads).
+- **Sequential & Parallel Execution**: Sequential queue or parallel worker pool (`1–100` threads).
+- **Endpoint Type Selectors & Custom Endpoints**: Built-in routing across `/v1/chat/completions`, `/v1/audio/transcriptions`, `/v1/audio/translations`, `/v1/audio/speech` (playable/downloadable audio output), `/v1/embeddings`, `/v1/responses`, and **Custom Endpoint** (relative path or full URL with `auto`/`json`/`multipart` payload modes).
+- **Endpoint File Handling & Management**: Attach files in the sidebar Endpoint File Manager with per-endpoint scoping (`Current`, `All Endpoints`, or specific endpoint), multipart form field editing, enable/disable toggles, size/MIME tracking, and text context previews.
 - **SSE Streaming**: Real-time Server-Sent Events token streaming with live TTFB timing and `tokens/sec` metrics.
 - **Timeout & Retry Control**: Configurable request timeouts (`10–600s`, default `300s`), batch abort, and one-click bulk retry for failed/idle targets.
-- **Server-Side Proxy Routes**: Express middleware (`/api/*`) avoids exposing credentials unnecessarily and eliminates browser CORS friction where applicable.
+- **Server-Side Proxy Routes**: Express middleware (`/api/*`, including `/api/proxy/chat` and `/api/proxy/endpoint` multipart/binary passthrough) avoids exposing credentials unnecessarily and eliminates browser CORS friction where applicable.
 
 ### 4.2 Prompt Engineering & System Prompt Layer
-- **System Prompt Injection**: Enable/disable directives globally ("all models") or per-target ("specific models") with built-in personas (`Concise Expert`, `Deep Analyst`, `Code Architect`).
-- **Prompt Test Suites**: Curated test batteries including *Nerdy Kings (18)* systems/reasoning benchmarks, *Classic Benchmarks*, and *HTML Games Generators*.
+- **System Prompt Injection**: Enable/disable directives globally ("all models") or per-target ("specific models") with 9 built-in personas organized across **Engineering** (`Concise Expert`, `Deep Analyst`, `Code Architect`), **Daily Use** (`Daily Assistant`, `Writing & Comms`, `Quick Summarizer`), and **DevOps / SRE** (`DevOps / SRE`, `Incident Triage`, `SecOps & Containers`).
+- **Prompt Test Suites**: Curated test batteries including *Systems & Reasoning (18)* engineering benchmarks, *Classic Benchmarks*, and *HTML Games Generators*.
 
 ### 4.3 Data Visualization & Comparison
 - **Split & Card Views**: Live streaming output, Markdown rendering, raw output inspection, embedded HTML preview frames, and Web Speech TTS playback.
@@ -65,7 +67,7 @@ The platform ships two synchronized interfaces backed by compatible execution se
 
 ### 5.2 Multi-Tab Terminal Interface (`1`–`6`)
 - **`1:Prompt` (Suites & Live Preview)**:
-  - Scrollable suite catalog (`ListState`) including *Nerdy Kings (18)*, *Classic Benchmarks*, *HTML Games Generators*, and the **Tools, Web Search & MCP** battery (`tm-01`–`tm-08`: strict tool schemas, multi-tool orchestration, web search query planning & grounded synthesis, MCP server JSON-RPC handlers, multi-MCP routers, indirect prompt injection defense, and parallel read/write barriers).
+  - Scrollable suite catalog (`ListState`) including *Systems & Reasoning (18)*, *Classic Benchmarks*, *HTML Games Generators*, and the **Tools, Web Search & MCP** battery (`tm-01`–`tm-08`: strict tool schemas, multi-tool orchestration, web search query planning & grounded synthesis, MCP server JSON-RPC handlers, multi-MCP routers, indirect prompt injection defense, and parallel read/write barriers).
   - Split right column displaying **Active Prompt** (top, editable via `i`) and live **Suite Preview** (bottom, updating continuously on `↑`/`↓` before loading with `Enter`/`Space`).
 - **`2:Responses`**:
   - Stateful auto-scrolling **Targets** list (`ListState`) tracking selection accurately across large model sets, paired with wrapped output pane (`PgUp`/`PgDn` or `J`/`K` independent scrolling) and live `TTFB`, `tok/s`, and token metrics.
@@ -74,7 +76,7 @@ The platform ships two synchronized interfaces backed by compatible execution se
 - **`4:Diff` & `5:XY Graph`**:
   - Myers token diff viewer (`a`/`b` selectors) and terminal scatter chart (`TTFB ms` vs `tok/s`).
 - **`6:Config`**:
-  - Left pane for execution mode (`m`), concurrency (`+/-`), timeout (`[/]`), SSE toggle (`v`), system prompt/persona (`p`/`P`), theme (`t`), provider key status, and Supabase summary.
+  - Left pane for execution mode (`m`), concurrency (`+/-`, `1–100` threads), endpoint type (`E`, `/v1/chat/completions`, `/v1/audio/*`, `/v1/embeddings`, `/v1/responses`, `custom`) & active `[[endpoint_files]]` count, timeout (`[/]`), SSE toggle (`v`), system prompt/persona (`p`/`P` across Engineering, Daily Use, DevOps), theme (`t`), provider key status, and Supabase summary.
   - Right column split vertically into:
     1. **Target Providers**: Shows `[x]`/`[~]`/`[ ]` and `(enabled/total)` counts; `Space`/`Enter` rapidly enables or disables all models for a provider; `d`/`D` refreshes models.
     2. **Model Filter Textbox**: Focus via `/`, `f`, or `Shift+Tab` to filter models live across model name, provider ID, and provider name; supports `Ctrl+G` (save subgroup), `Ctrl+D` (deselect matches), `Ctrl+A` (select matches), `Ctrl+U` (clear filter), and `Esc` (exit).
@@ -97,7 +99,7 @@ The platform ships two synchronized interfaces backed by compatible execution se
   - `main.rs` — CLI (`clap`) subcommands & terminal event loop.
   - `config.rs` — TOML persistence, `.bak` backup creation, env overrides, provider model aggregation, validation.
   - `engine.rs` — Async `reqwest` streaming benchmark runner, phase timings, error advice, `/models` discovery.
-  - `suites.rs` — Built-in personas and prompt suites (*Nerdy Kings*, *Classic*, *HTML*, *Tools, Web Search & MCP*).
+  - `suites.rs` — Built-in personas (Engineering, Daily Use, DevOps Use) and prompt suites (*Systems & Reasoning*, *Classic*, *HTML*, *Tools, Web Search & MCP*).
   - `app.rs` — TUI state machine, filtering, waterfall sorting, keybindings, export/sync triggers.
   - `ui.rs` — 5-theme `ratatui` renderer with stateful list/table scrolling.
   - `diff.rs`, `export.rs` — Token diffing, local JSON history, JSON/CSV bundle export, Supabase REST sync.

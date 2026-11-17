@@ -1,13 +1,16 @@
+export type PersonaCategory = 'engineering' | 'daily' | 'devops';
+
 export interface SystemPersona {
   id: string;
   name: string;
+  category: PersonaCategory;
   description: string;
   prompt: string;
 }
 
 export interface PromptSuiteItem {
   id: string;
-  suite: 'nerdy-kings' | 'html-games' | 'classic-benchmarks';
+  suite: 'systems-reasoning' | 'html-games' | 'classic-benchmarks';
   suiteLabel: string;
   index: number;
   title: string;
@@ -20,6 +23,7 @@ export const SYSTEM_PERSONAS: SystemPersona[] = [
   {
     id: 'concise-expert',
     name: 'Concise Expert',
+    category: 'engineering',
     description: 'Direct, high-signal technical answers without filler.',
     prompt:
       'You are a principal systems engineer. Respond with crisp, authoritative precision. Omit conversational preambles, cite concrete complexity bounds or edge cases, and keep formatting scannable.',
@@ -27,6 +31,7 @@ export const SYSTEM_PERSONAS: SystemPersona[] = [
   {
     id: 'deep-analyst',
     name: 'Deep Analyst',
+    category: 'engineering',
     description: 'First-principles decomposition with step-by-step verification.',
     prompt:
       'You are a rigorous analytical researcher. Decompose the problem from first principles, explicitly verify assumptions, explore failure modes and trade-offs, and conclude with a structured synthesis.',
@@ -34,18 +39,69 @@ export const SYSTEM_PERSONAS: SystemPersona[] = [
   {
     id: 'code-architect',
     name: 'Code Architect',
+    category: 'engineering',
     description: 'Production-ready implementations with clean types and invariants.',
     prompt:
       'You are a staff software architect. Produce clean, idiomatic, production-grade code with explicit error handling, strong typing, and clear architectural rationale.',
   },
+  // Daily Use Presets
+  {
+    id: 'daily-assistant',
+    name: 'Daily Assistant',
+    category: 'daily',
+    description: 'Clear everyday productivity helper for planning, checklists, and Q&A.',
+    prompt:
+      'You are a practical, organized everyday assistant. Give clear, direct answers in plain language, structure next steps as concise checklists or bullet points, and highlight anything time-sensitive or ambiguous.',
+  },
+  {
+    id: 'writing-editor',
+    name: 'Writing & Comms',
+    category: 'daily',
+    description: 'Sharp editor for emails, docs, specs, and clear stakeholder updates.',
+    prompt:
+      'You are an executive technical writer and editor. Tighten prose for clarity and tone, preserve the author’s core intent, eliminate fluff, and present scannable key takeaways up front.',
+  },
+  {
+    id: 'quick-summarizer',
+    name: 'Quick Summarizer',
+    category: 'daily',
+    description: 'Distills notes, threads, or transcripts into TL;DR, decisions, and actions.',
+    prompt:
+      'Distill the input into three tight sections: 1) TL;DR (2-3 sentences), 2) Key Facts & Decisions, and 3) Action Items (with owners and open questions if mentioned). Never invent unstated facts.',
+  },
+  // DevOps / SRE Use Presets
+  {
+    id: 'devops-sre',
+    name: 'DevOps / SRE',
+    category: 'devops',
+    description: 'CI/CD, Kubernetes, Terraform/IaC, observability, and safe rollout planning.',
+    prompt:
+      'You are a Principal Site Reliability & DevOps Engineer. Provide copy-pasteable, idempotent configurations (Docker, Kubernetes, Terraform, GitHub Actions), include health checks, least-privilege IAM, observability signals, and a concrete rollback plan.',
+  },
+  {
+    id: 'incident-triage',
+    name: 'Incident Triage',
+    category: 'devops',
+    description: 'On-call commander: rapid root-cause isolation, mitigation, and diagnostics.',
+    prompt:
+      'You are an on-call Incident Commander. Prioritize blast-radius containment first, list exact read-only diagnostic commands (kubectl, journalctl, curl, ss, promql) to isolate root cause, separate immediate mitigation from permanent fixes, and avoid risky destructive commands.',
+  },
+  {
+    id: 'secops-hardening',
+    name: 'SecOps & Containers',
+    category: 'devops',
+    description: 'Container hardening, TLS/secrets hygiene, network policies, and CVE triage.',
+    prompt:
+      'You are a DevSecOps engineer auditing cloud infrastructure and containers. Flag privilege escalations, plaintext secret exposure, overly permissive CIDR/RBAC rules, and supply minimal hardened patches adhering to CIS benchmarks.',
+  },
 ];
 
 export const PROMPT_SUITES: PromptSuiteItem[] = [
-  // Nerdy Kings Test Battery (18 advanced reasoning and coding prompts)
+  // Systems & Reasoning Battery (18 advanced engineering, systems, math & debugging prompts)
   {
     id: 'nk-01',
-    suite: 'nerdy-kings',
-    suiteLabel: 'Nerdy Kings Test Battery',
+    suite: 'systems-reasoning',
+    suiteLabel: 'Systems & Reasoning',
     index: 1,
     title: 'Lock-Free Ring Buffer in Rust/TS',
     category: 'Concurrency',
@@ -54,8 +110,8 @@ export const PROMPT_SUITES: PromptSuiteItem[] = [
   },
   {
     id: 'nk-02',
-    suite: 'nerdy-kings',
-    suiteLabel: 'Nerdy Kings Test Battery',
+    suite: 'systems-reasoning',
+    suiteLabel: 'Systems & Reasoning',
     index: 2,
     title: 'Raft Split-Brain Edge Case',
     category: 'Distributed Systems',
@@ -64,8 +120,8 @@ export const PROMPT_SUITES: PromptSuiteItem[] = [
   },
   {
     id: 'nk-03',
-    suite: 'nerdy-kings',
-    suiteLabel: 'Nerdy Kings Test Battery',
+    suite: 'systems-reasoning',
+    suiteLabel: 'Systems & Reasoning',
     index: 3,
     title: 'SIMD UTF-8 Validation',
     category: 'Low-Level Systems',
@@ -74,8 +130,8 @@ export const PROMPT_SUITES: PromptSuiteItem[] = [
   },
   {
     id: 'nk-04',
-    suite: 'nerdy-kings',
-    suiteLabel: 'Nerdy Kings Test Battery',
+    suite: 'systems-reasoning',
+    suiteLabel: 'Systems & Reasoning',
     index: 4,
     title: 'Zero-Allocation JSON Tokenizer',
     category: 'Compilers & Parsers',
@@ -84,8 +140,8 @@ export const PROMPT_SUITES: PromptSuiteItem[] = [
   },
   {
     id: 'nk-05',
-    suite: 'nerdy-kings',
-    suiteLabel: 'Nerdy Kings Test Battery',
+    suite: 'systems-reasoning',
+    suiteLabel: 'Systems & Reasoning',
     index: 5,
     title: 'B+ Tree vs LSM-Tree Write Amplification',
     category: 'Storage Engines',
@@ -94,8 +150,8 @@ export const PROMPT_SUITES: PromptSuiteItem[] = [
   },
   {
     id: 'nk-06',
-    suite: 'nerdy-kings',
-    suiteLabel: 'Nerdy Kings Test Battery',
+    suite: 'systems-reasoning',
+    suiteLabel: 'Systems & Reasoning',
     index: 6,
     title: 'Type-Level State Machine',
     category: 'Type Theory',
@@ -104,8 +160,8 @@ export const PROMPT_SUITES: PromptSuiteItem[] = [
   },
   {
     id: 'nk-07',
-    suite: 'nerdy-kings',
-    suiteLabel: 'Nerdy Kings Test Battery',
+    suite: 'systems-reasoning',
+    suiteLabel: 'Systems & Reasoning',
     index: 7,
     title: 'Consistent Hashing with Bounded Loads',
     category: 'Algorithms',
@@ -114,8 +170,8 @@ export const PROMPT_SUITES: PromptSuiteItem[] = [
   },
   {
     id: 'nk-08',
-    suite: 'nerdy-kings',
-    suiteLabel: 'Nerdy Kings Test Battery',
+    suite: 'systems-reasoning',
+    suiteLabel: 'Systems & Reasoning',
     index: 8,
     title: 'KV-Cache PagedAttention Math',
     category: 'ML Systems',
@@ -124,8 +180,8 @@ export const PROMPT_SUITES: PromptSuiteItem[] = [
   },
   {
     id: 'nk-09',
-    suite: 'nerdy-kings',
-    suiteLabel: 'Nerdy Kings Test Battery',
+    suite: 'systems-reasoning',
+    suiteLabel: 'Systems & Reasoning',
     index: 9,
     title: 'CRDT Fractional Indexing & RGA',
     category: 'Collaborative Editing',
@@ -134,8 +190,8 @@ export const PROMPT_SUITES: PromptSuiteItem[] = [
   },
   {
     id: 'nk-10',
-    suite: 'nerdy-kings',
-    suiteLabel: 'Nerdy Kings Test Battery',
+    suite: 'systems-reasoning',
+    suiteLabel: 'Systems & Reasoning',
     index: 10,
     title: 'Byzantine Generals Minimum Bound',
     category: 'Formal Reasoning',
@@ -144,8 +200,8 @@ export const PROMPT_SUITES: PromptSuiteItem[] = [
   },
   {
     id: 'nk-11',
-    suite: 'nerdy-kings',
-    suiteLabel: 'Nerdy Kings Test Battery',
+    suite: 'systems-reasoning',
+    suiteLabel: 'Systems & Reasoning',
     index: 11,
     title: 'PostgreSQL MVCC Vacuum Bloat Diagnosis',
     category: 'Databases',
@@ -154,8 +210,8 @@ export const PROMPT_SUITES: PromptSuiteItem[] = [
   },
   {
     id: 'nk-12',
-    suite: 'nerdy-kings',
-    suiteLabel: 'Nerdy Kings Test Battery',
+    suite: 'systems-reasoning',
+    suiteLabel: 'Systems & Reasoning',
     index: 12,
     title: 'Myers Diff Algorithm Optimization',
     category: 'Algorithms',
@@ -164,8 +220,8 @@ export const PROMPT_SUITES: PromptSuiteItem[] = [
   },
   {
     id: 'nk-13',
-    suite: 'nerdy-kings',
-    suiteLabel: 'Nerdy Kings Test Battery',
+    suite: 'systems-reasoning',
+    suiteLabel: 'Systems & Reasoning',
     index: 13,
     title: 'Floating-Point Kahan Summation Trap',
     category: 'Numerical Methods',
@@ -174,8 +230,8 @@ export const PROMPT_SUITES: PromptSuiteItem[] = [
   },
   {
     id: 'nk-14',
-    suite: 'nerdy-kings',
-    suiteLabel: 'Nerdy Kings Test Battery',
+    suite: 'systems-reasoning',
+    suiteLabel: 'Systems & Reasoning',
     index: 14,
     title: 'TLS 1.3 0-RTT Replay Vulnerability',
     category: 'Security',
@@ -184,8 +240,8 @@ export const PROMPT_SUITES: PromptSuiteItem[] = [
   },
   {
     id: 'nk-15',
-    suite: 'nerdy-kings',
-    suiteLabel: 'Nerdy Kings Test Battery',
+    suite: 'systems-reasoning',
+    suiteLabel: 'Systems & Reasoning',
     index: 15,
     title: 'HyperLogLog Harmonic Mean Bias',
     category: 'Probabilistic DS',
@@ -194,8 +250,8 @@ export const PROMPT_SUITES: PromptSuiteItem[] = [
   },
   {
     id: 'nk-16',
-    suite: 'nerdy-kings',
-    suiteLabel: 'Nerdy Kings Test Battery',
+    suite: 'systems-reasoning',
+    suiteLabel: 'Systems & Reasoning',
     index: 16,
     title: 'Speculative Decoding Acceptance Proof',
     category: 'ML Inference',
@@ -204,8 +260,8 @@ export const PROMPT_SUITES: PromptSuiteItem[] = [
   },
   {
     id: 'nk-17',
-    suite: 'nerdy-kings',
-    suiteLabel: 'Nerdy Kings Test Battery',
+    suite: 'systems-reasoning',
+    suiteLabel: 'Systems & Reasoning',
     index: 17,
     title: 'WebGPU Matrix Multiply Tiling',
     category: 'GPU Compute',
@@ -214,8 +270,8 @@ export const PROMPT_SUITES: PromptSuiteItem[] = [
   },
   {
     id: 'nk-18',
-    suite: 'nerdy-kings',
-    suiteLabel: 'Nerdy Kings Test Battery',
+    suite: 'systems-reasoning',
+    suiteLabel: 'Systems & Reasoning',
     index: 18,
     title: 'Debugging a Subtle Async Race Condition',
     category: 'Debugging',

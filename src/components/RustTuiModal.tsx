@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { Check, Copy, Download, Terminal, X } from 'lucide-react';
 import type {
+  EndpointFileAttachment,
   ExecutionConfig,
   ModelRunResult,
   ProviderEndpoint,
@@ -22,6 +23,7 @@ interface RustTuiModalProps {
   supabaseConfig: SupabaseConfig;
   providers: ProviderEndpoint[];
   targets: TargetModel[];
+  endpointFiles?: EndpointFileAttachment[];
   results: ModelRunResult[];
   prompt: string;
 }
@@ -37,6 +39,7 @@ export const RustTuiModal: React.FC<RustTuiModalProps> = ({
   supabaseConfig,
   providers,
   targets,
+  endpointFiles = [],
   results,
   prompt,
 }) => {
@@ -54,9 +57,10 @@ export const RustTuiModal: React.FC<RustTuiModalProps> = ({
         supabaseConfig,
         providers,
         targets,
+        endpointFiles,
         includeInlineSecrets: includeSecrets,
       }),
-    [executionConfig, systemPrompt, theme, supabaseConfig, providers, targets, includeSecrets]
+    [executionConfig, systemPrompt, theme, supabaseConfig, providers, targets, endpointFiles, includeSecrets]
   );
 
   if (!open) return null;
@@ -239,7 +243,14 @@ export const RustTuiModal: React.FC<RustTuiModalProps> = ({
                       Config File: ./benchforge.toml
                     </div>
                     <div>
-                      Mode [m]: {executionConfig.mode} · Threads [+/-]: {executionConfig.concurrency} · Timeout [[/]]: {executionConfig.timeoutSec}s · Stream [v]: {String(executionConfig.stream)}
+                      Mode [m]: {executionConfig.mode} · Threads [+/-]: {executionConfig.concurrency}/100 · Timeout [[/]]: {executionConfig.timeoutSec}s · Stream [v]: {String(executionConfig.stream)}
+                    </div>
+                    <div>
+                      Endpoint [E]: {executionConfig.endpointType ?? 'chat-completions'}
+                      {executionConfig.endpointType === 'custom' && executionConfig.customEndpoint
+                        ? ` (${executionConfig.customEndpoint})`
+                        : ''}{' '}
+                      · Files: {endpointFiles.filter((f) => f.enabled).length}
                     </div>
                     <div>
                       System Prompt [p]: {String(systemPrompt.enabled)} · Persona [P]: {systemPrompt.personaId ?? 'none'}

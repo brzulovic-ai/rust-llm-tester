@@ -951,8 +951,16 @@ impl AppState {
             }
             KeyCode::Enter | KeyCode::Char(' ') => self.activate_selected(),
             KeyCode::Char('+') | KeyCode::Char('=') if self.active_tab == ActiveTab::ConfigEditor => {
-                self.config.execution.concurrency = (self.config.execution.concurrency + 1).min(10);
+                self.config.execution.concurrency = (self.config.execution.concurrency + 1).min(100);
                 self.config_dirty = true;
+            }
+            KeyCode::Char('E') if self.active_tab == ActiveTab::ConfigEditor => {
+                self.config.execution.endpoint_type = self.config.execution.endpoint_type.next();
+                self.config_dirty = true;
+                self.status_message = format!(
+                    "Endpoint Type: {}",
+                    self.config.execution.endpoint_type.label()
+                );
             }
             KeyCode::Char('-') if self.active_tab == ActiveTab::ConfigEditor => {
                 self.config.execution.concurrency = self.config.execution.concurrency.saturating_sub(1).max(1);
@@ -1445,6 +1453,15 @@ impl AppState {
                                         self.config_dirty = true;
                                         self.status_message =
                                             format!("Theme: {}", self.config.ui.theme.label());
+                                    }
+                                    7 => {
+                                        self.config.execution.endpoint_type =
+                                            self.config.execution.endpoint_type.next();
+                                        self.config_dirty = true;
+                                        self.status_message = format!(
+                                            "Endpoint Type: {}",
+                                            self.config.execution.endpoint_type.label()
+                                        );
                                     }
                                     _ => {}
                                 }

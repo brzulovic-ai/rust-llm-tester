@@ -39,17 +39,23 @@ describe('Execution Engine, Suites & History Store', () => {
     vi.restoreAllMocks();
   });
 
-  it('includes all 18 Nerdy Kings prompts, 4 HTML Games, and 4 Classic Benchmarks', () => {
-    const nk = PROMPT_SUITES.filter((p) => p.suite === 'nerdy-kings');
+  it('includes all 18 Systems & Reasoning prompts, 4 HTML Games, and 4 Classic Benchmarks', () => {
+    const sr = PROMPT_SUITES.filter((p) => p.suite === 'systems-reasoning');
     const hg = PROMPT_SUITES.filter((p) => p.suite === 'html-games');
     const cb = PROMPT_SUITES.filter((p) => p.suite === 'classic-benchmarks');
-    expect(nk).toHaveLength(18);
+    expect(sr).toHaveLength(18);
     expect(hg).toHaveLength(4);
     expect(cb).toHaveLength(4);
     expect(SYSTEM_PERSONAS.map((p) => p.name)).toEqual([
       'Concise Expert',
       'Deep Analyst',
       'Code Architect',
+      'Daily Assistant',
+      'Writing & Comms',
+      'Quick Summarizer',
+      'DevOps / SRE',
+      'Incident Triage',
+      'SecOps & Containers',
     ]);
   });
 

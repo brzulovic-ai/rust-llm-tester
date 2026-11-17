@@ -3,7 +3,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import App from '../App';
 import { CapabilityGraphView } from '../components/CapabilityGraphView';
 import { WaterfallView } from '../components/WaterfallView';
-import type { ExecutionConfig, ModelRunResult, ProviderEndpoint, TargetModel } from '../types/benchmark';
+import type {
+  EndpointFileAttachment,
+  ExecutionConfig,
+  ModelRunResult,
+  ProviderEndpoint,
+  TargetModel,
+} from '../types/benchmark';
+import {
+  filesForEndpoint,
+  resolveEndpointUrl,
+  shouldUseMultipartUpload,
+} from '../utils/endpointUtils';
 import { runExecutionPool } from '../utils/executionEngine';
 import { createInitialTiming, extractHtmlSnippet, formatMs, parseSseLines } from '../utils/metrics';
 import { encodeShareState } from '../utils/shareUtils';
@@ -390,5 +401,186 @@ describe('Extended Coverage Suite (50+ Target)', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Capability Graph' }));
     expect(screen.getByText('XY Capability Scatter Plot')).toBeInTheDocument();
+  });
+
+  it('resolves endpoint URLs, scoped files, and multipart upload rules cleanly', () => {
+    expect(resolveEndpointUrl('https://api.openai.com/v1/', 'audio-transcriptions')).toBe(
+      'https://api.openai.com/v1/audio/transcriptions'
+    );
+    expect(resolveEndpointUrl('https://api.openai.com/v1', 'custom', '/v1/rerank')).toBe(
+      'https://api.openai.com/v1/rerank'
+    );
+    expect(
+      resolveEndpointUrl('http://localhost:8000/v1', 'custom', 'https://custom.local/infer')
+    ).toBe('https://custom.local/infer');
+
+    const files: EndpointFileAttachment[] = [
+      {
+        id: 'f1',
+        name: 'clip.mp3',
+        mimeType: 'audio/mpeg',
+        sizeBytes: 128,
+        endpointScope: 'audio-transcriptions',
+        fieldName: 'file',
+        base64Data: 'AAAA',
+        enabled: true,
+        addedAt: 1,
+      },
+      {
+        id: 'f2',
+        name: 'notes.txt',
+        mimeType: 'text/plain',
+        sizeBytes: 64,
+        endpointScope: 'all',
+        fieldName: 'context',
+        base64Data: 'aGVsbG8=',
+        textPreview: 'hello',
+        enabled: true,
+        addedAt: 2,
+      },
+      {
+        id: 'f3',
+        name: 'disabled.wav',
+        mimeType: 'audio/wav',
+        sizeBytes: 64,
+        endpointScope: 'audio-transcriptions',
+        fieldName: 'file',
+        base64Data: 'AAAA',
+        enabled: false,
+        addedAt: 3,
+      },
+    ];
+
+    expect(filesForEndpoint(files, 'audio-transcriptions').map((f) => f.id)).toEqual(['f1', 'f2']);
+    expect(filesForEndpoint(files, 'embeddings').map((f) => f.id)).toEqual(['f2']);
+    expect(shouldUseMultipartUpload('audio-transcriptions', 'auto', [])).toBe(true);
+    expect(shouldUseMultipartUpload('custom', 'auto', [files[0]])).toBe(true);
+    expect(shouldUseMultipartUpload('custom', 'json', [files[0]])).toBe(false);
+  });
+
+  it('validates missing audio file error and sends multipart upload via /api/proxy/endpoint when attached', async () => {
+    const provider: ProviderEndpoint = {
+      id: 'p-audio',
+      name: 'OpenAI Audio',
+      kind: 'openai',
+      baseUrl: 'https://api.openai.com/v1',
+      apiKey: 'sk-test',
+      customHeaders: {},
+      directBrowser: false,
+      models: ['whisper-1'],
+    };
+    const target: TargetModel = {
+      id: 't-whisper',
+      providerId: 'p-audio',
+      providerName: 'OpenAI Audio',
+      providerKind: 'openai',
+      modelName: 'whisper-1',
+      enabled: true,
+    };
+    const execCfg: ExecutionConfig = {
+      mode: 'parallel',
+      concurrency: 50,
+      timeoutSec: 60,
+      stream: false,
+      temperature: 0,
+      maxTokens: 512,
+      topP: 1,
+      endpointType: 'audio-transcriptions',
+    };
+
+    const missingRes = await runExecutionPool({
+      targets: [target],
+      providers: [provider],
+      prompt: '',
+      systemPrompt: { enabled: false, content: '', personaId: null, targetMode: 'all', targetModelIds: [] },
+      executionConfig: execCfg,
+      endpointFiles: [],
+      signal: new AbortController().signal,
+      onResultUpdate: () => {},
+    });
+    expect(missingRes[0].status).toBe('error');
+    expect(missingRes[0].error).toContain('requires an attached audio file');
+
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ text: 'Transcribed audio sample' }),
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const okRes = await runExecutionPool({
+      targets: [target],
+      providers: [provider],
+      prompt: 'Transcribe cleanly',
+      systemPrompt: { enabled: false, content: '', personaId: null, targetMode: 'all', targetModelIds: [] },
+      executionConfig: execCfg,
+      endpointFiles: [
+        {
+          id: 'aud-1',
+          name: 'voice.mp3',
+          mimeType: 'audio/mpeg',
+          sizeBytes: 3,
+          endpointScope: 'audio-transcriptions',
+          fieldName: 'file',
+          base64Data: btoa('abc'),
+          enabled: true,
+          addedAt: 1,
+        },
+      ],
+      signal: new AbortController().signal,
+      onResultUpdate: () => {},
+    });
+
+    expect(okRes[0].status).toBe('completed');
+    expect(okRes[0].output).toBe('Transcribed audio sample');
+    expect(fetchSpy.mock.calls[0][0]).toBe('/api/proxy/endpoint');
+  });
+
+  it('supports Daily Use & DevOps Use personas, 100 max threads, and Endpoint Type selector in UI', () => {
+    render(<App />);
+    expect(screen.getByRole('button', { name: /Systems & Reasoning \(18\)/i })).toBeInTheDocument();
+
+    const devopsButtons = screen.getAllByRole('button', { name: 'DevOps / SRE' });
+    fireEvent.click(devopsButtons[devopsButtons.length - 1]);
+    expect(screen.getByDisplayValue(/Principal Site Reliability/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Daily Assistant' }));
+    expect(screen.getByDisplayValue(/everyday assistant/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Configuration & Models/i }));
+    const workerInput = screen.getByLabelText('Concurrent workers count') as HTMLInputElement;
+    expect(workerInput.max).toBe('100');
+    fireEvent.change(workerInput, { target: { value: '100' } });
+    expect(workerInput.value).toBe('100');
+
+    const epSelect = screen.getByLabelText('Endpoint type');
+    fireEvent.change(epSelect, { target: { value: 'custom' } });
+    expect(screen.getByLabelText('Custom endpoint path or URL')).toBeInTheDocument();
+    expect(screen.getByLabelText('Upload file endpoint scope')).toBeInTheDocument();
+    expect(screen.getByText('Endpoint File Manager')).toBeInTheDocument();
+  });
+
+  it('adjusts, clamps, resets, and persists root font size next to the theme selector', () => {
+    render(<App />);
+    const incBtn = screen.getByRole('button', { name: 'Increase font size' });
+    const decBtn = screen.getByRole('button', { name: 'Decrease font size' });
+    const resetBtn = screen.getByRole('button', { name: 'Reset font size' });
+
+    expect(resetBtn).toHaveTextContent('16px');
+    expect(document.documentElement.style.fontSize).toBe('16px');
+
+    fireEvent.click(incBtn);
+    expect(resetBtn).toHaveTextContent('17px');
+    expect(document.documentElement.style.fontSize).toBe('17px');
+
+    fireEvent.click(decBtn);
+    fireEvent.click(decBtn);
+    expect(resetBtn).toHaveTextContent('15px');
+    expect(document.documentElement.style.fontSize).toBe('15px');
+
+    fireEvent.click(resetBtn);
+    expect(resetBtn).toHaveTextContent('16px');
+    expect(document.documentElement.style.fontSize).toBe('16px');
   });
 });
