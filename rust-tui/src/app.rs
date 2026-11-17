@@ -1,8 +1,11 @@
-use crate::config::{BenchConfig, ExecutionMode, ThemeId};
+use crate::config::{BenchConfig, ExecutionMode, TargetConfig, ThemeId};
 use crate::engine::{
     spawn_benchmark_batch, spawn_refresh_provider_models, EngineEvent, ModelRunResult, RunStatus,
 };
-use crate::export::{export_bundle, load_history, push_run_supabase, save_run_to_history, BenchmarkRunRecord};
+use crate::export::{
+    export_bundle, import_bundle_json, load_history, load_latest_export, push_run_supabase,
+    save_run_to_history, BenchmarkRunRecord,
+};
 use crate::suites::{PING_PROBE_PROMPT, PROMPT_SUITES, SYSTEM_PERSONAS};
 use chrono::Utc;
 use crossterm::event::{
@@ -527,10 +530,12 @@ impl AppState {
 
     pub fn ordered_results(&self) -> Vec<ModelRunResult> {
         let mut list = Vec::new();
+        let mut seen = HashSet::new();
         for t in &self.config.targets {
             if !t.enabled && !self.results.contains_key(&t.id) {
                 continue;
             }
+            seen.insert(t.id.clone());
             if let Some(res) = self.results.get(&t.id) {
                 list.push(res.clone());
             } else {
@@ -556,14 +561,39 @@ impl AppState {
                 });
             }
         }
+        let mut extra: Vec<&ModelRunResult> = self
+            .results
+            .values()
+            .filter(|r| !seen.contains(&r.target_id))
+            .collect();
+        extra.sort_by(|a, b| a.model_name.cmp(&b.model_name));
+        for res in extra {
+            list.push(res.clone());
+        }
         list
+    }
+
+    pub fn shuffle_targets_in_place(targets: &mut [TargetConfig], seed: u64) {
+        if targets.len() <= 1 {
+            return;
+        }
+        let mut state = seed ^ 0x9E37_79B9_7F4A_7C15;
+        for i in (1..targets.len()).rev() {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            let j = (z as usize) % (i + 1);
+            targets.swap(i, j);
+        }
     }
 
     pub fn start_run(&mut self, retry_failed_only: bool) {
         if self.is_running {
             return;
         }
-        let targets: Vec<_> = self
+        let mut targets: Vec<_> = self
             .config
             .targets
             .iter()
@@ -594,6 +624,14 @@ impl AppState {
             return;
         }
 
+        if self.config.execution.randomize_order {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(1);
+            Self::shuffle_targets_in_place(&mut targets, nanos ^ (targets.len() as u64));
+        }
+
         if !retry_failed_only {
             self.results.clear();
         }
@@ -601,7 +639,11 @@ impl AppState {
         self.abort_tx = Some(abort_tx);
         self.is_running = true;
         self.active_tab = ActiveTab::Responses;
-        self.status_message = format!("Running {} target(s)...", targets.len());
+        self.status_message = if self.config.execution.randomize_order {
+            format!("Running {} target(s) [random order]...", targets.len())
+        } else {
+            format!("Running {} target(s)...", targets.len())
+        };
 
         spawn_benchmark_batch(
             self.config.clone(),
@@ -788,6 +830,49 @@ impl AppState {
         }
     }
 
+    pub fn apply_imported_record(&mut self, record: BenchmarkRunRecord) {
+        if !record.prompt.is_empty() {
+            self.prompt = record.prompt.clone();
+        }
+        if !record.title.is_empty() {
+            self.run_title = record.title.clone();
+        }
+        self.results.clear();
+        let count = record.results.len();
+        for res in &record.results {
+            self.results.insert(res.target_id.clone(), res.clone());
+        }
+        self.selected_result_idx = 0;
+        self.waterfall_selected_idx = 0;
+        self.output_scroll = 0;
+        if let Ok(updated) = save_run_to_history(record, self.config.ui.history_limit) {
+            self.history = updated;
+        }
+        self.status_message = format!("Imported {} result(s) into workspace.", count);
+    }
+
+    pub fn import_results_from_str(&mut self, raw: &str) -> Result<usize, String> {
+        let record = import_bundle_json(raw).map_err(|e| e.to_string())?;
+        let count = record.results.len();
+        self.apply_imported_record(record);
+        Ok(count)
+    }
+
+    pub fn import_latest_results(&mut self) {
+        let export_dir = PathBuf::from("exports");
+        match load_latest_export(&export_dir) {
+            Ok((path, record)) => {
+                let count = record.results.len();
+                self.apply_imported_record(record);
+                self.status_message =
+                    format!("Imported {} result(s) from {}", count, path.display());
+            }
+            Err(err) => {
+                self.status_message = format!("Import JSON failed: {}", err);
+            }
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
@@ -925,6 +1010,7 @@ impl AppState {
             KeyCode::Char('x') => self.abort_run(),
             KeyCode::Char('s') => self.save_config(),
             KeyCode::Char('e') => self.export_results(),
+            KeyCode::Char('L') => self.import_latest_results(),
             KeyCode::Char('z') => self.load_ping_probe(),
             KeyCode::Char('g') if self.active_tab == ActiveTab::PromptSuites => {
                 self.load_ping_probe();
@@ -1002,6 +1088,14 @@ impl AppState {
             KeyCode::Char('v') if self.active_tab == ActiveTab::ConfigEditor => {
                 self.config.execution.stream = !self.config.execution.stream;
                 self.config_dirty = true;
+            }
+            KeyCode::Char('N') if self.active_tab == ActiveTab::ConfigEditor => {
+                self.config.execution.randomize_order = !self.config.execution.randomize_order;
+                self.config_dirty = true;
+                self.status_message = format!(
+                    "Random model order: {}",
+                    self.config.execution.randomize_order
+                );
             }
             KeyCode::Char('p') if self.active_tab == ActiveTab::ConfigEditor => {
                 self.config.system_prompt.enabled = !self.config.system_prompt.enabled;
@@ -1492,6 +1586,19 @@ impl AppState {
                                             self.config.execution.endpoint_type.label()
                                         );
                                     }
+                                    8 => {
+                                        if col < area.x + area.width / 2 {
+                                            self.config.execution.randomize_order =
+                                                !self.config.execution.randomize_order;
+                                            self.config_dirty = true;
+                                            self.status_message = format!(
+                                                "Random model order: {}",
+                                                self.config.execution.randomize_order
+                                            );
+                                        } else {
+                                            self.import_latest_results();
+                                        }
+                                    }
                                     _ => {}
                                 }
                             }
@@ -1735,6 +1842,51 @@ mod tests {
         assert_eq!(app.config_focus, ConfigFocus::Models);
         assert_eq!(app.selected_config_idx, 0);
         assert_eq!(app.config.targets[0].enabled, !before_enabled);
+    }
+
+    #[test]
+    fn random_order_toggle_shuffles_and_imports_results_json() {
+        let mut app = test_app();
+        app.active_tab = ActiveTab::ConfigEditor;
+        assert!(!app.config.execution.randomize_order);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT));
+        assert!(app.config.execution.randomize_order);
+
+        let mut list = app.config.targets.clone();
+        let original_ids: Vec<String> = list.iter().map(|t| t.id.clone()).collect();
+        AppState::shuffle_targets_in_place(&mut list, 42);
+        let shuffled_ids: Vec<String> = list.iter().map(|t| t.id.clone()).collect();
+        assert_eq!(shuffled_ids.len(), original_ids.len());
+        assert_ne!(shuffled_ids, original_ids);
+
+        let sample_json = r#"{
+          "run": {
+            "id": "imp-1",
+            "title": "Imported JSON Run",
+            "createdAt": 1760000000000,
+            "prompt": "Ping",
+            "results": [
+              {
+                "targetId": "external-free-1",
+                "modelName": "qwen-free",
+                "providerName": "OpenRouter",
+                "status": "completed",
+                "output": "pong",
+                "promptTokens": 2,
+                "completionTokens": 1,
+                "totalTokens": 3,
+                "tokensPerSec": 40.0,
+                "httpStatus": 200,
+                "timing": { "queueMs": 1, "requestMs": 10, "ttfbMs": 20, "downloadMs": 5, "totalMs": 36 }
+              }
+            ]
+          }
+        }"#;
+        let count = app.import_results_from_str(sample_json).expect("import json");
+        assert_eq!(count, 1);
+        assert_eq!(app.run_title, "Imported JSON Run");
+        assert!(app.ordered_results().iter().any(|r| r.model_name == "qwen-free"));
     }
 }
 

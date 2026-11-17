@@ -64,6 +64,7 @@ export function generateBenchforgeToml(input: TomlExportInput): string {
     `temperature = ${executionConfig.temperature}`,
     `max_tokens = ${executionConfig.maxTokens}`,
     `top_p = ${executionConfig.topP}`,
+    `randomize_order = ${Boolean(executionConfig.randomizeOrder)}`,
     `endpoint_type = ${tomlString(executionConfig.endpointType ?? 'chat-completions')}`,
   ];
 

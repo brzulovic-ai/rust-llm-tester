@@ -58,6 +58,7 @@ interface SidebarAccordionProps {
   onLoadHistoryRun: (run: BenchmarkRunRecord) => void;
   onDeleteHistoryRun: (id: string) => void;
   onClearHistory: () => void;
+  onImportJsonFile?: (file: File) => void;
   supabaseConfig: SupabaseConfig;
   onSupabaseConfigChange: (next: SupabaseConfig) => void;
   syncLogs: SyncLogEntry[];
@@ -95,6 +96,7 @@ export const SidebarAccordion: React.FC<SidebarAccordionProps> = ({
   onLoadHistoryRun,
   onDeleteHistoryRun,
   onClearHistory,
+  onImportJsonFile,
   supabaseConfig,
   onSupabaseConfigChange,
   syncLogs,
@@ -882,16 +884,36 @@ export const SidebarAccordion: React.FC<SidebarAccordionProps> = ({
                   />
                 </label>
 
-                <label className="flex items-center gap-2 pt-5 cursor-pointer" style={{ color: 'var(--text-secondary)' }}>
-                  <input
-                    type="checkbox"
-                    checked={executionConfig.stream}
-                    onChange={(e) =>
-                      onExecutionConfigChange({ ...executionConfig, stream: e.target.checked })
-                    }
-                  />
-                  <span>SSE Stream</span>
-                </label>
+                <div className="flex flex-col justify-end gap-1.5 pt-2">
+                  <label className="flex items-center gap-2 cursor-pointer" style={{ color: 'var(--text-secondary)' }}>
+                    <input
+                      type="checkbox"
+                      checked={executionConfig.stream}
+                      onChange={(e) =>
+                        onExecutionConfigChange({ ...executionConfig, stream: e.target.checked })
+                      }
+                    />
+                    <span>SSE Stream</span>
+                  </label>
+                  <label
+                    className="flex items-center gap-2 cursor-pointer"
+                    style={{ color: 'var(--text-secondary)' }}
+                    title="Randomly shuffle enabled models each time a benchmark runs"
+                  >
+                    <input
+                      type="checkbox"
+                      aria-label="Randomize model order"
+                      checked={Boolean(executionConfig.randomizeOrder)}
+                      onChange={(e) =>
+                        onExecutionConfigChange({
+                          ...executionConfig,
+                          randomizeOrder: e.target.checked,
+                        })
+                      }
+                    />
+                    <span>Random</span>
+                  </label>
+                </div>
               </div>
             </div>
 
@@ -1456,21 +1478,43 @@ export const SidebarAccordion: React.FC<SidebarAccordionProps> = ({
           <div className="px-4 pb-4 space-y-4">
             {/* Local History (last 50 runs) */}
             <div className="space-y-2">
-              <div className="flex items-center justify-between text-xs">
+              <div className="flex items-center justify-between gap-2 text-xs">
                 <span className="inline-flex items-center gap-1.5 font-semibold" style={{ color: 'var(--text-primary)' }}>
                   <Database className="w-3.5 h-3.5" />
                   <span>Local Runs ({history.length}/50)</span>
                 </span>
-                {history.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={onClearHistory}
-                    className="text-[11px] hover:underline cursor-pointer"
-                    style={{ color: 'var(--status-error)' }}
-                  >
-                    Clear All
-                  </button>
-                )}
+                <div className="flex items-center gap-2">
+                  {onImportJsonFile && (
+                    <label
+                      className="inline-flex items-center gap-1 text-[11px] hover:underline cursor-pointer"
+                      style={{ color: 'var(--accent-primary)' }}
+                    >
+                      <Upload className="w-3 h-3" />
+                      <span>Import JSON</span>
+                      <input
+                        type="file"
+                        accept=".json,application/json"
+                        aria-label="Import benchmark JSON in history"
+                        className="sr-only"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) onImportJsonFile(file);
+                          e.target.value = '';
+                        }}
+                      />
+                    </label>
+                  )}
+                  {history.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={onClearHistory}
+                      className="text-[11px] hover:underline cursor-pointer"
+                      style={{ color: 'var(--status-error)' }}
+                    >
+                      Clear All
+                    </button>
+                  )}
+                </div>
               </div>
 
               {history.length === 0 ? (

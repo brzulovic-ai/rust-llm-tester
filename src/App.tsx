@@ -9,6 +9,7 @@ import {
   Share2,
   Square,
   Terminal,
+  Upload,
   X,
 } from 'lucide-react';
 import { CapabilityGraphView } from './components/CapabilityGraphView';
@@ -33,7 +34,12 @@ import type {
 } from './types/benchmark';
 import { filesForEndpoint, getEndpointPreset } from './utils/endpointUtils';
 import { executeSingleTarget, runExecutionPool } from './utils/executionEngine';
-import { buildCsvExport, buildJsonExport, triggerFileDownload } from './utils/exportUtils';
+import {
+  buildCsvExport,
+  buildJsonExport,
+  parseBenchmarkResultsJson,
+  triggerFileDownload,
+} from './utils/exportUtils';
 import {
   clearHistory,
   DEFAULT_FONT_SIZE,
@@ -103,6 +109,7 @@ export default function App() {
     concurrency: 3,
     timeoutSec: 300,
     stream: true,
+    randomizeOrder: false,
     temperature: 0.7,
     maxTokens: 2048,
     topP: 1,
@@ -115,10 +122,15 @@ export default function App() {
   const [resultsMap, setResultsMap] = useState<Record<string, ModelRunResult>>({});
   const [isRunning, setIsRunning] = useState<boolean>(false);
   const [shareCopied, setShareCopied] = useState<boolean>(false);
+  const [importFeedback, setImportFeedback] = useState<{
+    kind: 'success' | 'error';
+    message: string;
+  } | null>(null);
   const [cardLayout, setCardLayout] = useState<'grid' | 'split'>('grid');
   const [rustTuiOpen, setRustTuiOpen] = useState<boolean>(false);
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const isResizingRef = useRef<boolean>(false);
 
   // Sync theme to documentElement
@@ -393,13 +405,44 @@ export default function App() {
     setRunTitle(run.title);
     setSuiteName(run.suiteName);
     setSystemPrompt(run.systemPrompt);
-    setExecutionConfig(run.executionConfig);
+    setExecutionConfig({
+      randomizeOrder: false,
+      ...run.executionConfig,
+    });
     const map: Record<string, ModelRunResult> = {};
     run.results.forEach((r) => {
       map[r.targetId] = r;
     });
     setResultsMap(map);
     setMobileSidebarOpen(false);
+  };
+
+  const handleImportJsonFile = async (file: File) => {
+    try {
+      const rawText =
+        typeof file.text === 'function'
+          ? await file.text()
+          : await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(String(reader.result ?? ''));
+              reader.onerror = () => reject(new Error('Failed to read selected JSON file.'));
+              reader.readAsText(file);
+            });
+      const imported = parseBenchmarkResultsJson(rawText);
+      handleLoadHistoryRun(imported);
+      setHistory(saveRunToHistory(imported));
+      setImportFeedback({
+        kind: 'success',
+        message: `Imported "${imported.title}" (${imported.results.length} result${
+          imported.results.length === 1 ? '' : 's'
+        }) from ${file.name}.`,
+      });
+    } catch (err) {
+      setImportFeedback({
+        kind: 'error',
+        message: err instanceof Error ? err.message : 'Failed to import benchmark JSON file.',
+      });
+    }
   };
 
   const handleTestSupabase = async () => {
@@ -569,6 +612,7 @@ export default function App() {
             onTargetsChange={setTargets}
             history={history}
             onLoadHistoryRun={handleLoadHistoryRun}
+            onImportJsonFile={handleImportJsonFile}
             onDeleteHistoryRun={(id) => setHistory(deleteRunFromHistory(id))}
             onClearHistory={() => {
               clearHistory();
@@ -746,6 +790,35 @@ export default function App() {
 
               <button
                 type="button"
+                onClick={() => importFileInputRef.current?.click()}
+                title="Import benchmark results.json"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border text-xs font-medium cursor-pointer whitespace-nowrap shrink-0"
+                style={{
+                  borderColor: 'var(--border-subtle)',
+                  backgroundColor: 'var(--bg-elevated)',
+                  color: 'var(--text-primary)',
+                }}
+              >
+                <Upload className="w-3.5 h-3.5" />
+                <span>Import JSON</span>
+              </button>
+              <input
+                ref={importFileInputRef}
+                type="file"
+                accept=".json,application/json"
+                aria-label="Import benchmark results JSON"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) {
+                    void handleImportJsonFile(file);
+                  }
+                  e.target.value = '';
+                }}
+              />
+
+              <button
+                type="button"
                 onClick={handleShareLink}
                 disabled={orderedResults.length === 0}
                 className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border text-xs font-medium cursor-pointer disabled:opacity-40 whitespace-nowrap shrink-0"
@@ -841,6 +914,34 @@ export default function App() {
 
           {/* Active View Canvas */}
           <div className="flex-1 overflow-y-auto p-5">
+            {importFeedback && (
+              <div
+                role="status"
+                className="mb-4 px-3 py-2 rounded-lg border flex items-center justify-between gap-3 text-xs"
+                style={{
+                  borderColor:
+                    importFeedback.kind === 'error'
+                      ? 'var(--status-error)'
+                      : 'var(--status-success)',
+                  backgroundColor: 'var(--bg-surface)',
+                  color:
+                    importFeedback.kind === 'error'
+                      ? 'var(--status-error)'
+                      : 'var(--text-primary)',
+                }}
+              >
+                <span>{importFeedback.message}</span>
+                <button
+                  type="button"
+                  aria-label="Dismiss import message"
+                  onClick={() => setImportFeedback(null)}
+                  className="p-0.5 rounded hover:opacity-75 cursor-pointer"
+                  style={{ color: 'var(--text-muted)' }}
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
             {activeView === 'cards' && (
               orderedResults.length === 0 ? (
                 <div

@@ -131,6 +131,7 @@ pub struct ExecutionConfig {
     pub concurrency: usize,
     pub timeout_sec: u64,
     pub stream: bool,
+    pub randomize_order: bool,
     pub temperature: f32,
     pub max_tokens: u32,
     pub top_p: f32,
@@ -147,6 +148,7 @@ impl Default for ExecutionConfig {
             concurrency: 3,
             timeout_sec: 300,
             stream: true,
+            randomize_order: false,
             temperature: 0.7,
             max_tokens: 2048,
             top_p: 1.0,
@@ -1085,5 +1087,6 @@ mod tests {
         assert_eq!(decoded.execution.concurrency, 100);
         assert_eq!(decoded.execution.endpoint_type, EndpointType::AudioTranscriptions);
         assert_eq!(decoded.endpoint_files.len(), 1);
+        assert!(!decoded.execution.randomize_order);
     }
 }

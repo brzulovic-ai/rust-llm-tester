@@ -613,6 +613,18 @@ export interface RunPoolOptions {
 }
 
 /**
+ * Returns a randomly shuffled shallow copy using Fisher-Yates.
+ */
+export function shuffleItems<T>(items: readonly T[]): T[] {
+  const copy = [...items];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
+/**
  * Executes a batch of model targets using either sequential (concurrency=1)
  * or parallel worker pool (concurrency 1..100).
  */
@@ -630,6 +642,8 @@ export async function runExecutionPool(options: RunPoolOptions): Promise<ModelRu
 
   if (targets.length === 0) return [];
 
+  const orderedTargets = executionConfig.randomizeOrder ? shuffleItems(targets) : targets;
+
   const workerCount =
     executionConfig.mode === 'sequential'
       ? 1
@@ -637,10 +651,10 @@ export async function runExecutionPool(options: RunPoolOptions): Promise<ModelRu
 
   const enqueuedAt = performance.now();
   const providerMap = new Map(providers.map((p) => [p.id, p]));
-  const finalResults = new Array<ModelRunResult>(targets.length);
+  const finalResults = new Array<ModelRunResult>(orderedTargets.length);
 
   // Initialize queued state immediately
-  targets.forEach((target) => {
+  orderedTargets.forEach((target) => {
     const provider = providerMap.get(target.providerId);
     onResultUpdate(target.id, {
       targetId: target.id,
@@ -660,10 +674,10 @@ export async function runExecutionPool(options: RunPoolOptions): Promise<ModelRu
   let nextIndex = 0;
 
   async function worker() {
-    while (nextIndex < targets.length) {
+    while (nextIndex < orderedTargets.length) {
       if (signal.aborted) break;
       const idx = nextIndex++;
-      const target = targets[idx];
+      const target = orderedTargets[idx];
       const provider = providerMap.get(target.providerId);
 
       if (!provider) {
@@ -702,7 +716,7 @@ export async function runExecutionPool(options: RunPoolOptions): Promise<ModelRu
     }
   }
 
-  const workers = Array.from({ length: Math.min(workerCount, targets.length) }, () => worker());
+  const workers = Array.from({ length: Math.min(workerCount, orderedTargets.length) }, () => worker());
   await Promise.all(workers);
 
   return finalResults.filter(Boolean);

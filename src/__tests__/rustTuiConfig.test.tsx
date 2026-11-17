@@ -12,6 +12,7 @@ describe('Rust TUI TOML Config & Modal', () => {
         concurrency: 100,
         timeoutSec: 240,
         stream: true,
+        randomizeOrder: true,
         temperature: 0.5,
         maxTokens: 4096,
         topP: 0.9,
@@ -47,6 +48,7 @@ describe('Rust TUI TOML Config & Modal', () => {
     expect(toml).toContain('[execution]');
     expect(toml).toContain('concurrency = 100');
     expect(toml).toContain('endpoint_type = "audio-transcriptions"');
+    expect(toml).toContain('randomize_order = true');
     expect(toml).toContain('timeout_sec = 240');
     expect(toml).toContain('seed = 7');
     expect(toml).toContain('theme = "sepia-dark"');

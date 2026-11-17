@@ -76,6 +76,7 @@ export interface ExecutionConfig {
   maxTokens: number;
   topP: number;
   seed?: number;
+  randomizeOrder?: boolean;
   endpointType?: EndpointType;
   customEndpoint?: string;
   customPayloadMode?: EndpointPayloadMode;

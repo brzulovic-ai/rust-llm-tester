@@ -651,4 +651,148 @@ describe('Extended Coverage Suite (50+ Target)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Load ping test prompt' }));
     expect(screen.getByDisplayValue('Reply with exactly "pong" and nothing else.')).toBeInTheDocument();
   });
+
+  it('shuffles selected target execution order when randomizeOrder checkbox is enabled', async () => {
+    const { shuffleItems } = await import('../utils/executionEngine');
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+
+    const shuffled = shuffleItems(['a', 'b', 'c']);
+    expect(shuffled).toHaveLength(3);
+    expect(shuffled).toEqual(['b', 'c', 'a']);
+
+    const executedOrder: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+        const body = JSON.parse(init.body as string) as { model: string };
+        executedOrder.push(body.model);
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ 'content-type': 'application/json' }),
+          json: async () => ({ choices: [{ message: { content: 'pong' } }] }),
+        };
+      })
+    );
+
+    const providers: ProviderEndpoint[] = [
+      {
+        id: 'p1',
+        name: 'P1',
+        kind: 'openai',
+        baseUrl: 'https://api.example.com/v1',
+        apiKey: '',
+        customHeaders: {},
+        directBrowser: false,
+        models: ['m1', 'm2', 'm3'],
+      },
+    ];
+    const targets: TargetModel[] = [
+      { id: 't1', providerId: 'p1', providerName: 'P1', providerKind: 'openai', modelName: 'm1', enabled: true },
+      { id: 't2', providerId: 'p1', providerName: 'P1', providerKind: 'openai', modelName: 'm2', enabled: true },
+      { id: 't3', providerId: 'p1', providerName: 'P1', providerKind: 'openai', modelName: 'm3', enabled: true },
+    ];
+
+    await runExecutionPool({
+      targets,
+      providers,
+      prompt: 'ping',
+      systemPrompt: { enabled: false, content: '', personaId: null, targetMode: 'all', targetModelIds: [] },
+      executionConfig: {
+        mode: 'sequential',
+        concurrency: 1,
+        timeoutSec: 30,
+        stream: false,
+        randomizeOrder: true,
+        temperature: 0.2,
+        maxTokens: 64,
+        topP: 1,
+      },
+      signal: new AbortController().signal,
+      onResultUpdate: () => {},
+    });
+
+    expect(executedOrder).toEqual(['m2', 'm3', 'm1']);
+  });
+
+  it('parses Web and Rust TUI benchmark results.json exports and imports them in App UI', async () => {
+    const { parseBenchmarkResultsJson } = await import('../utils/exportUtils');
+
+    const rustJson = JSON.stringify({
+      id: 'rust-1',
+      title: 'Rust TUI Export',
+      created_at: '2026-11-17T01:00:00Z',
+      prompt: 'Ping test',
+      results: [
+        {
+          target_id: 'target-rust-1',
+          model_name: 'llama-3.3-free',
+          provider_name: 'Groq',
+          status: 'Completed',
+          output: 'pong',
+          prompt_tokens: 3,
+          completion_tokens: 1,
+          total_tokens: 4,
+          tokens_per_sec: 88.2,
+          http_status: 200,
+          timing: { offset_ms: 0, queue_ms: 2, request_ms: 15, ttfb_ms: 35, download_ms: 10, total_ms: 62 },
+        },
+      ],
+    });
+    const parsedRust = parseBenchmarkResultsJson(rustJson);
+    expect(parsedRust.title).toBe('Rust TUI Export');
+    expect(parsedRust.results[0].modelName).toBe('llama-3.3-free');
+    expect(parsedRust.results[0].httpStatus).toBe(200);
+    expect(parsedRust.results[0].timing.ttfbMs).toBe(35);
+
+    expect(() => parseBenchmarkResultsJson('{bad json')).toThrow(/Invalid JSON/);
+
+    render(<App />);
+
+    // Toggle Random checkbox in Configuration & Models
+    fireEvent.click(screen.getByRole('button', { name: /Configuration & Models/i }));
+    const randomCheckbox = screen.getByLabelText('Randomize model order') as HTMLInputElement;
+    expect(randomCheckbox.checked).toBe(false);
+    fireEvent.click(randomCheckbox);
+    expect(randomCheckbox.checked).toBe(true);
+
+    // Import results.json via toolbar upload input
+    const webPayload = JSON.stringify({
+      run: {
+        id: 'imp-web-1',
+        title: 'Imported Free Models Run',
+        createdAt: Date.now(),
+        prompt: 'Reply with pong',
+        systemPrompt: { enabled: false, content: '', personaId: null, targetMode: 'all', targetModelIds: [] },
+        executionConfig: { mode: 'parallel', concurrency: 4, timeoutSec: 120, stream: true, randomizeOrder: true, temperature: 0.7, maxTokens: 512, topP: 1 },
+        results: [
+          {
+            targetId: 'imp-target-1',
+            modelName: 'qwen3-free-imported',
+            providerName: 'OpenRouter',
+            providerKind: 'openai',
+            status: 'completed',
+            output: 'pong imported!',
+            promptTokens: 5,
+            completionTokens: 2,
+            totalTokens: 7,
+            tokensPerSec: 75,
+            httpStatus: 200,
+            timing: { enqueuedAt: 0, startedAt: 1, headersAt: 20, firstTokenAt: 30, completedAt: 60, queueMs: 1, requestMs: 19, ttfbMs: 29, downloadMs: 30, totalMs: 59 },
+          },
+        ],
+      },
+    });
+    const fileInput = screen.getByLabelText('Import benchmark results JSON') as HTMLInputElement;
+    const mockFile = {
+      name: 'results.json',
+      type: 'application/json',
+      text: async () => webPayload,
+    } as unknown as File;
+    fireEvent.change(fileInput, { target: { files: [mockFile] } });
+
+    expect(await screen.findByText(/Imported "Imported Free Models Run" \(1 result\) from results\.json\./i)).toBeInTheDocument();
+    expect(screen.getByText('Imported Free Models Run')).toBeInTheDocument();
+    expect(screen.getByText('pong imported!')).toBeInTheDocument();
+  });
 });

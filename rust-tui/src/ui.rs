@@ -154,9 +154,9 @@ fn draw_footer(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect
         ActiveTab::ConfigEditor if app.config_focus == ConfigFocus::Subgroups => {
             "SUBGROUPS: Enter/2xClick Solo · Space/Click [ ] Toggle · g Save New · Del Delete · Shift+Tab Next"
         }
-        ActiveTab::ConfigEditor => "Click/Shift+Tab Panes · / Filter · g Save Subgroup · Space/Click [ ] Toggle · u Deselect · s Save",
-        ActiveTab::DiffCompare => "a / Click Left Baseline · b / Click Right Candidate · r Run · e Export · q Quit",
-        _ => "Click/1-6 Tabs · Mouse Wheel Scroll · r Run · R Retry · x Abort · s Save Config · e Export · q Quit",
+        ActiveTab::ConfigEditor => "Click/Shift+Tab Panes · / Filter · g Save Subgroup · N Random · L Import JSON · s Save",
+        ActiveTab::DiffCompare => "a / Click Left Baseline · b / Click Right Candidate · r Run · e Export · L Import · q Quit",
+        _ => "Click/1-6 Tabs · Mouse Wheel Scroll · r Run · R Retry · x Abort · s Save Config · e Export · L Import · q Quit",
     };
 
     let footer = Paragraph::new(vec![
@@ -659,7 +659,10 @@ fn draw_config_tab(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette, ar
             app.config.execution.endpoint_type.label(),
             app.config.matching_endpoint_files().len()
         )),
-        Line::from(""),
+        Line::from(format!(
+            "Random Sort [N]: {}        Import JSON [L]",
+            app.config.execution.randomize_order
+        )),
         Line::from(Span::styled(
             "Configured Providers & Key Status:",
             Style::default().fg(pal.accent).add_modifier(Modifier::BOLD),
