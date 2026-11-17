@@ -2,7 +2,7 @@ use crate::app::{ActiveTab, AppState, ConfigFocus, UiLayoutZones, WaterfallSortF
 use crate::config::{ExecutionMode, ThemeId};
 use crate::diff::{compute_token_diff, DiffOp};
 use crate::engine::RunStatus;
-use crate::suites::PROMPT_SUITES;
+use crate::suites::{lookup_persona, PROMPT_SUITES};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -581,7 +581,11 @@ fn draw_config_tab(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette, ar
         .system_prompt
         .persona
         .as_deref()
-        .unwrap_or("custom/none");
+        .map(|id| match lookup_persona(id) {
+            Some(p) => format!("{} [{}]", p.name, p.category),
+            None => id.to_string(),
+        })
+        .unwrap_or_else(|| "custom/none".to_string());
 
     let mut lines = vec![
         Line::from(Span::styled(
