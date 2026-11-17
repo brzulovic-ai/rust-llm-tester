@@ -3,8 +3,8 @@ use crate::engine::{
     spawn_benchmark_batch, spawn_refresh_provider_models, EngineEvent, ModelRunResult, RunStatus,
 };
 use crate::export::{
-    export_bundle, import_bundle_json, load_history, load_latest_export, push_run_supabase,
-    save_run_to_history, BenchmarkRunRecord,
+    export_bundle, load_history, load_latest_export, push_run_supabase, save_run_to_history,
+    BenchmarkRunRecord,
 };
 use crate::suites::{PING_PROBE_PROMPT, PROMPT_SUITES, SYSTEM_PERSONAS};
 use chrono::Utc;
@@ -852,8 +852,9 @@ impl AppState {
         self.status_message = format!("Imported {} result(s) into workspace.", count);
     }
 
+    #[cfg(test)]
     pub fn import_results_from_str(&mut self, raw: &str) -> Result<usize, String> {
-        let record = import_bundle_json(raw).map_err(|e| e.to_string())?;
+        let record = crate::export::import_bundle_json(raw).map_err(|e| e.to_string())?;
         let count = record.results.len();
         self.apply_imported_record(record);
         Ok(count)
