@@ -13,6 +13,8 @@ pub struct PromptSuiteItem {
     pub prompt: &'static str,
 }
 
+pub const PING_PROBE_PROMPT: &str = "Reply with exactly \"pong\" and nothing else.";
+
 pub const SYSTEM_PERSONAS: &[SystemPersona] = &[
     SystemPersona {
         id: "concise-expert",
@@ -196,6 +198,13 @@ pub const PROMPT_SUITES: &[PromptSuiteItem] = &[
         title: "18. Async Cache Race Condition",
         category: "Debugging",
         prompt: "Given an async cache getOrCompute(key, fn) storing in-flight futures, identify three production race/poisoning bugs and write the fixed version.",
+    },
+    PromptSuiteItem {
+        id: "ping-01",
+        suite: "Classic Benchmarks",
+        title: "Ping / Model Liveness Check",
+        category: "Liveness",
+        prompt: PING_PROBE_PROMPT,
     },
     PromptSuiteItem {
         id: "cb-01",

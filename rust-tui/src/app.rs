@@ -3,7 +3,7 @@ use crate::engine::{
     spawn_benchmark_batch, spawn_refresh_provider_models, EngineEvent, ModelRunResult, RunStatus,
 };
 use crate::export::{export_bundle, load_history, push_run_supabase, save_run_to_history, BenchmarkRunRecord};
-use crate::suites::{PROMPT_SUITES, SYSTEM_PERSONAS};
+use crate::suites::{PING_PROBE_PROMPT, PROMPT_SUITES, SYSTEM_PERSONAS};
 use chrono::Utc;
 use crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -80,6 +80,7 @@ pub enum WaterfallSortField {
     Order,
     Model,
     Status,
+    Code,
     Queue,
     Request,
     Ttfb,
@@ -94,6 +95,7 @@ impl WaterfallSortField {
             WaterfallSortField::Order => "Config Order",
             WaterfallSortField::Model => "Model",
             WaterfallSortField::Status => "Status",
+            WaterfallSortField::Code => "Code",
             WaterfallSortField::Queue => "Queue",
             WaterfallSortField::Request => "Request",
             WaterfallSortField::Ttfb => "TTFB",
@@ -110,7 +112,8 @@ impl WaterfallSortField {
             WaterfallSortField::Ttfb => WaterfallSortField::Speed,
             WaterfallSortField::Speed => WaterfallSortField::Model,
             WaterfallSortField::Model => WaterfallSortField::Status,
-            WaterfallSortField::Status => WaterfallSortField::Queue,
+            WaterfallSortField::Status => WaterfallSortField::Code,
+            WaterfallSortField::Code => WaterfallSortField::Queue,
             WaterfallSortField::Queue => WaterfallSortField::Request,
             WaterfallSortField::Request => WaterfallSortField::Download,
             WaterfallSortField::Download => WaterfallSortField::Order,
@@ -122,7 +125,8 @@ impl WaterfallSortField {
             WaterfallSortField::Order => WaterfallSortField::Download,
             WaterfallSortField::Download => WaterfallSortField::Request,
             WaterfallSortField::Request => WaterfallSortField::Queue,
-            WaterfallSortField::Queue => WaterfallSortField::Status,
+            WaterfallSortField::Queue => WaterfallSortField::Code,
+            WaterfallSortField::Code => WaterfallSortField::Status,
             WaterfallSortField::Status => WaterfallSortField::Model,
             WaterfallSortField::Model => WaterfallSortField::Speed,
             WaterfallSortField::Speed => WaterfallSortField::Ttfb,
@@ -463,6 +467,16 @@ impl AppState {
             WaterfallSortField::Status => {
                 list.sort_by(|a, b| {
                     let ord = a.status.label().cmp(b.status.label());
+                    if self.waterfall_desc { ord.reverse() } else { ord }
+                });
+            }
+            WaterfallSortField::Code => {
+                list.sort_by(|a, b| {
+                    let (_, la) = a.classify_status();
+                    let (_, lb) = b.classify_status();
+                    let ca = a.http_status.unwrap_or(999);
+                    let cb = b.http_status.unwrap_or(999);
+                    let ord = ca.cmp(&cb).then_with(|| la.cmp(&lb));
                     if self.waterfall_desc { ord.reverse() } else { ord }
                 });
             }
@@ -911,6 +925,10 @@ impl AppState {
             KeyCode::Char('x') => self.abort_run(),
             KeyCode::Char('s') => self.save_config(),
             KeyCode::Char('e') => self.export_results(),
+            KeyCode::Char('z') => self.load_ping_probe(),
+            KeyCode::Char('g') if self.active_tab == ActiveTab::PromptSuites => {
+                self.load_ping_probe();
+            }
             KeyCode::Char('i') if self.active_tab == ActiveTab::PromptSuites => {
                 self.editing_prompt = true;
                 self.status_message = "Editing prompt (press Esc when done)".to_string();
@@ -1170,6 +1188,16 @@ impl AppState {
         }
     }
 
+    fn load_ping_probe(&mut self) {
+        self.prompt = PING_PROBE_PROMPT.to_string();
+        self.run_title = "Ping / Model Liveness Check".to_string();
+        if let Some(idx) = PROMPT_SUITES.iter().position(|s| s.id == "ping-01") {
+            self.selected_suite_idx = idx;
+        }
+        self.status_message =
+            "Loaded Ping probe prompt (press 'r' to test all enabled models)".to_string();
+    }
+
     fn activate_selected(&mut self) {
         match self.active_tab {
             ActiveTab::PromptSuites => {
@@ -1353,15 +1381,16 @@ impl AppState {
                             && col < area.x.saturating_add(area.width - 1)
                         {
                             if row == area.y + 1 {
-                                const WATERFALL_COLS: [(u16, WaterfallSortField); 8] = [
-                                    (22, WaterfallSortField::Model),
-                                    (10, WaterfallSortField::Status),
-                                    (10, WaterfallSortField::Queue),
-                                    (10, WaterfallSortField::Request),
-                                    (10, WaterfallSortField::Ttfb),
-                                    (11, WaterfallSortField::Download),
-                                    (11, WaterfallSortField::Total),
-                                    (10, WaterfallSortField::Speed),
+                                const WATERFALL_COLS: [(u16, WaterfallSortField); 9] = [
+                                    (20, WaterfallSortField::Model),
+                                    (9, WaterfallSortField::Status),
+                                    (13, WaterfallSortField::Code),
+                                    (9, WaterfallSortField::Queue),
+                                    (9, WaterfallSortField::Request),
+                                    (9, WaterfallSortField::Ttfb),
+                                    (10, WaterfallSortField::Download),
+                                    (10, WaterfallSortField::Total),
+                                    (9, WaterfallSortField::Speed),
                                 ];
                                 let mut x = area.x + 1;
                                 let mut chosen = WaterfallSortField::Order;
@@ -1671,15 +1700,24 @@ mod tests {
         assert_eq!(app.output_scroll, 3);
 
         app.active_tab = ActiveTab::Waterfall;
-        // Click TTFB column header at row = area.y + 1 = 4, col = 1 + 22+1 + 10+1 + 10+1 + 10+1 + 2 = 59
-        app.handle_mouse(left_click(59, 4));
+        // Click Code column header at row = area.y + 1 = 4, col = 1 + 20+1 + 9+1 + 3 = 35
+        app.handle_mouse(left_click(35, 4));
+        assert_eq!(app.waterfall_sort, WaterfallSortField::Code);
+        assert!(!app.waterfall_desc);
+
+        // Click TTFB column header at row = 4, col = 1 + 20+1 + 9+1 + 13+1 + 9+1 + 9+1 + 2 = 67
+        app.handle_mouse(left_click(67, 4));
         assert_eq!(app.waterfall_sort, WaterfallSortField::Ttfb);
         assert!(!app.waterfall_desc);
 
         // Click same column header again flips desc
-        app.handle_mouse(left_click(59, 4));
+        app.handle_mouse(left_click(67, 4));
         assert_eq!(app.waterfall_sort, WaterfallSortField::Ttfb);
         assert!(app.waterfall_desc);
+
+        // Quick Ping loader sets dummy liveness prompt
+        app.load_ping_probe();
+        assert!(app.prompt.contains("pong"));
     }
 
     #[test]

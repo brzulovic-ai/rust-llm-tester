@@ -96,6 +96,15 @@ export const SYSTEM_PERSONAS: SystemPersona[] = [
   },
 ];
 
+export const PING_PROBE_PROMPT = {
+  id: 'cb-00',
+  suite: 'classic-benchmarks' as const,
+  suiteLabel: 'Quick Probe',
+  title: 'Ping / Model Liveness Check',
+  category: 'Liveness',
+  prompt: 'Reply with exactly "pong" and nothing else.',
+};
+
 export const PROMPT_SUITES: PromptSuiteItem[] = [
   // Systems & Reasoning Battery (18 advanced engineering, systems, math & debugging prompts)
   {
@@ -322,6 +331,15 @@ export const PROMPT_SUITES: PromptSuiteItem[] = [
   },
 
   // Classic Benchmarks
+  {
+    id: 'cb-00',
+    suite: 'classic-benchmarks',
+    suiteLabel: 'Classic Benchmarks',
+    index: 0,
+    title: 'Ping / Model Liveness Check',
+    category: 'Liveness',
+    prompt: 'Reply with exactly "pong" and nothing else.',
+  },
   {
     id: 'cb-01',
     suite: 'classic-benchmarks',

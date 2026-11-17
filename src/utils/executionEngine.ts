@@ -361,10 +361,16 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
         error: errMessage,
         advice:
           advice ||
-          (response.status === 401
+          (response.status === 429
+            ? 'Rate limit exceeded (429). Lower parallel concurrency or wait before retrying.'
+            : response.status === 402
+            ? 'Quota or credits exhausted (402). Check provider billing/free-tier balance.'
+            : response.status === 401 || response.status === 403
             ? 'Check your API key or Authorization header.'
             : response.status === 404
             ? 'Verify base URL and model name.'
+            : response.status >= 500
+            ? `Upstream provider error (HTTP ${response.status}). Retry or test another model.`
             : 'Check provider logs and retry.'),
         timing,
       };
@@ -396,9 +402,17 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
           if (ev.error) {
             const completedAt = performance.now();
             timing = computeTimingMetrics({ ...timing, firstTokenAt, completedAt }, completedAt);
+            const errCodeMatch = ev.error.match(/\b(400|401|402|403|404|408|413|422|429|500|502|503|504)\b/);
+            const inferredCode =
+              response.status && response.status !== 200
+                ? response.status
+                : errCodeMatch
+                ? Number(errCodeMatch[1])
+                : undefined;
             const errResult: ModelRunResult = {
               ...currentResult,
               status: 'error',
+              httpStatus: inferredCode,
               output: accumulatedText,
               error: ev.error,
               advice: ev.advice,

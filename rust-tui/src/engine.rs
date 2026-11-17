@@ -45,6 +45,33 @@ pub struct TimingBreakdown {
     pub total_ms: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusCategory {
+    Ok,
+    Pending,
+    Aborted,
+    RateLimit,
+    Quota,
+    Auth,
+    NotFound,
+    Timeout,
+    Server,
+    Error,
+}
+
+fn extract_http_code_from_text(text: &str) -> Option<u16> {
+    for tok in text.split(|c: char| !c.is_ascii_digit()) {
+        if tok.len() == 3 {
+            if let Ok(n) = tok.parse::<u16>() {
+                if (400..=599).contains(&n) || n == 200 {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRunResult {
     pub target_id: String,
@@ -60,6 +87,86 @@ pub struct ModelRunResult {
     pub http_status: Option<u16>,
     pub error: Option<String>,
     pub advice: Option<String>,
+}
+
+impl ModelRunResult {
+    pub fn classify_status(&self) -> (StatusCategory, String) {
+        let code = self.http_status.or_else(|| {
+            self.error
+                .as_deref()
+                .and_then(extract_http_code_from_text)
+        });
+
+        match self.status {
+            RunStatus::Completed => {
+                let c = code.unwrap_or(200);
+                (StatusCategory::Ok, format!("{} OK", c))
+            }
+            RunStatus::Idle | RunStatus::Queued | RunStatus::Connecting | RunStatus::Streaming => {
+                (StatusCategory::Pending, "-".to_string())
+            }
+            RunStatus::Aborted => (StatusCategory::Aborted, "ABORTED".to_string()),
+            RunStatus::Error => {
+                let lower = format!(
+                    "{} {}",
+                    self.error.as_deref().unwrap_or(""),
+                    self.advice.as_deref().unwrap_or("")
+                )
+                .to_lowercase();
+
+                if code == Some(429)
+                    || lower.contains("rate limit")
+                    || lower.contains("rate_limit")
+                    || lower.contains("too many requests")
+                {
+                    let c = code.unwrap_or(429);
+                    return (StatusCategory::RateLimit, format!("{} RATE LIM", c));
+                }
+                if code == Some(402)
+                    || lower.contains("quota")
+                    || lower.contains("credit")
+                    || lower.contains("billing")
+                {
+                    let c = code.unwrap_or(402);
+                    return (StatusCategory::Quota, format!("{} QUOTA", c));
+                }
+                if code == Some(401)
+                    || code == Some(403)
+                    || lower.contains("unauthorized")
+                    || lower.contains("forbidden")
+                    || lower.contains("invalid api key")
+                {
+                    let c = code.unwrap_or(401);
+                    return (StatusCategory::Auth, format!("{} AUTH", c));
+                }
+                if code == Some(404)
+                    || lower.contains("not found")
+                    || lower.contains("does not exist")
+                {
+                    let c = code.unwrap_or(404);
+                    return (StatusCategory::NotFound, format!("{} NO MODEL", c));
+                }
+                if code == Some(408)
+                    || code == Some(504)
+                    || lower.contains("timed out")
+                    || lower.contains("timeout")
+                {
+                    let label = match code {
+                        Some(c) => format!("{} TIMEOUT", c),
+                        None => "TIMEOUT".to_string(),
+                    };
+                    return (StatusCategory::Timeout, label);
+                }
+                if let Some(c) = code {
+                    if c >= 500 {
+                        return (StatusCategory::Server, format!("{} SERVER", c));
+                    }
+                    return (StatusCategory::Error, format!("{} ERR", c));
+                }
+                (StatusCategory::Error, "NET ERR".to_string())
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -14,7 +14,7 @@ import {
   Trash2,
   Upload,
 } from 'lucide-react';
-import { PROMPT_SUITES, SYSTEM_PERSONAS, type PersonaCategory } from '../data/promptSuites';
+import { PING_PROBE_PROMPT, PROMPT_SUITES, SYSTEM_PERSONAS, type PersonaCategory } from '../data/promptSuites';
 import type {
   BenchmarkRunRecord,
   EndpointFileAttachment,
@@ -292,13 +292,35 @@ export const SidebarAccordion: React.FC<SidebarAccordionProps> = ({
           <div className="px-4 pb-4 space-y-4">
             {/* Prompt Input */}
             <div className="space-y-1.5">
-              <div className="flex items-center justify-between text-xs">
+              <div className="flex items-center justify-between gap-2 text-xs">
                 <label htmlFor="workbench-prompt-input" className="font-medium" style={{ color: 'var(--text-secondary)' }}>
                   Evaluation Prompt
                 </label>
-                <span className="font-mono tabular-nums" style={{ color: 'var(--text-muted)' }}>
-                  {prompt.length} chars
-                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    aria-label="Load ping test prompt"
+                    title='Load quick "pong" ping probe to check which models are available'
+                    onClick={() =>
+                      onSelectSuitePrompt(
+                        PING_PROBE_PROMPT.prompt,
+                        PING_PROBE_PROMPT.title,
+                        PING_PROBE_PROMPT.suiteLabel
+                      )
+                    }
+                    className="px-2 py-0.5 rounded border text-[11px] font-medium cursor-pointer hover:opacity-90 transition-opacity whitespace-nowrap"
+                    style={{
+                      borderColor: 'var(--border-subtle)',
+                      backgroundColor: 'var(--bg-elevated)',
+                      color: 'var(--accent-primary)',
+                    }}
+                  >
+                    Ping
+                  </button>
+                  <span className="font-mono tabular-nums" style={{ color: 'var(--text-muted)' }}>
+                    {prompt.length} chars
+                  </span>
+                </div>
               </div>
               <textarea
                 id="workbench-prompt-input"
@@ -519,7 +541,7 @@ export const SidebarAccordion: React.FC<SidebarAccordionProps> = ({
                       suiteTab === 'classic-benchmarks' ? 'var(--text-primary)' : 'var(--text-muted)',
                   }}
                 >
-                  Classic (4)
+                  Classic (5)
                 </button>
               </div>
 

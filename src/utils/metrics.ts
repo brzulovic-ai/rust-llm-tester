@@ -1,4 +1,4 @@
-import type { TimingBreakdown } from '../types/benchmark';
+import type { ModelRunResult, TimingBreakdown } from '../types/benchmark';
 
 export interface ParsedSseEvent {
   contentDelta: string;
@@ -166,4 +166,191 @@ export function extractHtmlSnippet(content: string): string | null {
     return htmlTagMatch[1].trim();
   }
   return null;
+}
+
+export type StatusCategory =
+  | 'ok'
+  | 'pending'
+  | 'aborted'
+  | 'rate-limit'
+  | 'quota'
+  | 'auth'
+  | 'not-found'
+  | 'timeout'
+  | 'bad-request'
+  | 'server'
+  | 'error';
+
+export interface StatusClassification {
+  category: StatusCategory;
+  codeLabel: string;
+  shortLabel: string;
+  badgeText: string;
+  httpCode: number | null;
+}
+
+export function extractHttpCodeFromText(text?: string): number | null {
+  if (!text) return null;
+  const httpMatch =
+    text.match(/\bHTTP\s+(\d{3})\b/i) ??
+    text.match(/\((\d{3})\)/) ??
+    text.match(/\b(400|401|402|403|404|408|413|422|429|500|502|503|504)\b/);
+  if (!httpMatch) return null;
+  const n = Number(httpMatch[1]);
+  return Number.isFinite(n) && n >= 100 && n <= 599 ? n : null;
+}
+
+export function classifyResultStatus(result: ModelRunResult): StatusClassification {
+  const httpCode = result.httpStatus ?? extractHttpCodeFromText(result.error);
+
+  if (result.status === 'completed') {
+    const code = httpCode ?? 200;
+    return {
+      category: 'ok',
+      codeLabel: String(code),
+      shortLabel: 'OK',
+      badgeText: `${code} OK`,
+      httpCode: code,
+    };
+  }
+
+  if (
+    result.status === 'idle' ||
+    result.status === 'queued' ||
+    result.status === 'connecting' ||
+    result.status === 'streaming'
+  ) {
+    const label =
+      result.status === 'queued'
+        ? 'Queued'
+        : result.status === 'connecting'
+        ? 'Connecting'
+        : result.status === 'streaming'
+        ? 'Streaming'
+        : 'Idle';
+    return {
+      category: 'pending',
+      codeLabel: '—',
+      shortLabel: label,
+      badgeText: label,
+      httpCode: null,
+    };
+  }
+
+  if (result.status === 'aborted') {
+    return {
+      category: 'aborted',
+      codeLabel: 'ABRT',
+      shortLabel: 'ABORTED',
+      badgeText: 'ABORTED',
+      httpCode: null,
+    };
+  }
+
+  const lower = `${result.error ?? ''} ${result.advice ?? ''}`.toLowerCase();
+
+  if (
+    httpCode === 429 ||
+    /rate.?limit|too many requests|\brpm\b|\btpm\b|\brpd\b/.test(lower)
+  ) {
+    const code = httpCode ?? 429;
+    return {
+      category: 'rate-limit',
+      codeLabel: String(code),
+      shortLabel: 'RATE LIMIT',
+      badgeText: `${code} RATE LIMIT`,
+      httpCode: code,
+    };
+  }
+
+  if (
+    httpCode === 402 ||
+    /insufficient_quota|quota|credit|billing|payment required/.test(lower)
+  ) {
+    const code = httpCode ?? 402;
+    return {
+      category: 'quota',
+      codeLabel: String(code),
+      shortLabel: 'QUOTA',
+      badgeText: `${code} QUOTA`,
+      httpCode: code,
+    };
+  }
+
+  if (
+    httpCode === 401 ||
+    httpCode === 403 ||
+    /unauthoriz|forbidden|invalid.?api.?key|authentication/.test(lower)
+  ) {
+    const code = httpCode ?? 401;
+    return {
+      category: 'auth',
+      codeLabel: String(code),
+      shortLabel: 'AUTH',
+      badgeText: `${code} AUTH`,
+      httpCode: code,
+    };
+  }
+
+  if (
+    httpCode === 404 ||
+    /not found|does not exist|unknown model|model_not_found/.test(lower)
+  ) {
+    const code = httpCode ?? 404;
+    return {
+      category: 'not-found',
+      codeLabel: String(code),
+      shortLabel: 'NOT FOUND',
+      badgeText: `${code} NOT FOUND`,
+      httpCode: code,
+    };
+  }
+
+  if (httpCode === 408 || httpCode === 504 || /timed out|timeout/.test(lower)) {
+    return {
+      category: 'timeout',
+      codeLabel: httpCode ? String(httpCode) : 'TIME',
+      shortLabel: 'TIMEOUT',
+      badgeText: httpCode ? `${httpCode} TIMEOUT` : 'TIMEOUT',
+      httpCode,
+    };
+  }
+
+  if (
+    httpCode === 400 ||
+    httpCode === 413 ||
+    httpCode === 422 ||
+    /context.?length|bad request|invalid request/.test(lower)
+  ) {
+    const code = httpCode ?? 400;
+    return {
+      category: 'bad-request',
+      codeLabel: String(code),
+      shortLabel: 'BAD REQ',
+      badgeText: `${code} BAD REQ`,
+      httpCode: code,
+    };
+  }
+
+  if (
+    (httpCode !== null && httpCode >= 500) ||
+    /bad gateway|service unavailable|overloaded|internal server error/.test(lower)
+  ) {
+    const code = httpCode ?? 502;
+    return {
+      category: 'server',
+      codeLabel: String(code),
+      shortLabel: 'SERVER',
+      badgeText: `${code} SERVER`,
+      httpCode: code,
+    };
+  }
+
+  return {
+    category: 'error',
+    codeLabel: httpCode ? String(httpCode) : 'NET',
+    shortLabel: httpCode ? 'HTTP ERR' : 'NET ERR',
+    badgeText: httpCode ? `${httpCode} ERR` : 'NET ERR',
+    httpCode,
+  };
 }

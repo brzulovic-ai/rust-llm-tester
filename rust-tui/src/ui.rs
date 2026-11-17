@@ -1,7 +1,7 @@
 use crate::app::{ActiveTab, AppState, ConfigFocus, UiLayoutZones, WaterfallSortField, TAB_TITLES};
 use crate::config::{ExecutionMode, ThemeId};
 use crate::diff::{compute_token_diff, DiffOp};
-use crate::engine::RunStatus;
+use crate::engine::{RunStatus, StatusCategory};
 use crate::suites::{lookup_persona, PROMPT_SUITES};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -218,7 +218,10 @@ fn draw_prompt_tab(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette, ar
     let prompt_title = if app.editing_prompt {
         format!(" Active Prompt [EDITING]: {} ", app.run_title)
     } else {
-        format!(" Active Prompt (click or press 'i' to edit): {} ", app.run_title)
+        format!(
+            " Active Prompt (i: Edit · g/z: Quick Ping): {} ",
+            app.run_title
+        )
     };
     let prompt_box = Paragraph::new(app.prompt.as_str())
         .wrap(Wrap { trim: false })
@@ -294,12 +297,15 @@ fn draw_responses_tab(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette,
         .enumerate()
         .map(|(i, r)| {
             let sel = i == active_idx;
-            let status_color = match r.status {
-                RunStatus::Completed => pal.success,
-                RunStatus::Error => pal.error,
-                RunStatus::Streaming | RunStatus::Connecting => pal.accent,
-                RunStatus::Aborted => pal.warning,
-                _ => pal.muted,
+            let (cat, code_label) = r.classify_status();
+            let status_color = match cat {
+                StatusCategory::Ok => pal.success,
+                StatusCategory::RateLimit | StatusCategory::Quota | StatusCategory::Timeout | StatusCategory::Aborted => pal.warning,
+                StatusCategory::Auth | StatusCategory::NotFound | StatusCategory::Server | StatusCategory::Error => pal.error,
+                StatusCategory::Pending => match r.status {
+                    RunStatus::Streaming | RunStatus::Connecting => pal.accent,
+                    _ => pal.muted,
+                },
             };
             ListItem::new(Line::from(vec![
                 Span::styled(if sel { "> " } else { "  " }, Style::default().fg(pal.accent)),
@@ -307,7 +313,7 @@ fn draw_responses_tab(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette,
                     format!("{} ", r.model_name),
                     Style::default().fg(pal.text).add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }),
                 ),
-                Span::styled(format!("[{}] {:.1} t/s", r.status.label(), r.tokens_per_sec), Style::default().fg(status_color)),
+                Span::styled(format!("[{}] {:.1} t/s", code_label, r.tokens_per_sec), Style::default().fg(status_color)),
             ]))
         })
         .collect();
@@ -387,6 +393,27 @@ fn draw_waterfall_tab(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette,
         Some(app.waterfall_selected_idx.min(results.len() - 1))
     };
 
+    let mut ok_count = 0usize;
+    let mut rate_limit_count = 0usize;
+    let mut err_count = 0usize;
+    for r in &results {
+        let (cat, _) = r.classify_status();
+        match cat {
+            StatusCategory::Ok => ok_count += 1,
+            StatusCategory::RateLimit => {
+                rate_limit_count += 1;
+                err_count += 1;
+            }
+            StatusCategory::Quota
+            | StatusCategory::Auth
+            | StatusCategory::NotFound
+            | StatusCategory::Timeout
+            | StatusCategory::Server
+            | StatusCategory::Error => err_count += 1,
+            _ => {}
+        }
+    }
+
     let rows: Vec<Row> = results
         .iter()
         .enumerate()
@@ -397,11 +424,23 @@ fn draw_waterfall_tab(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette,
                 .ttfb_ms
                 .map(|v| format!("{:.1} ms", v))
                 .unwrap_or_else(|| "-".to_string());
-            let bar_len = ((r.timing.total_ms / max_ms) * 20.0).round() as usize;
+            let bar_len = ((r.timing.total_ms / max_ms) * 16.0).round() as usize;
             let bar = "#".repeat(bar_len.max(1));
+            let (cat, code_label) = r.classify_status();
+            let code_style = match cat {
+                StatusCategory::Ok => Style::default().fg(pal.success).add_modifier(Modifier::BOLD),
+                StatusCategory::RateLimit | StatusCategory::Quota | StatusCategory::Timeout | StatusCategory::Aborted => {
+                    Style::default().fg(pal.warning).add_modifier(Modifier::BOLD)
+                }
+                StatusCategory::Auth | StatusCategory::NotFound | StatusCategory::Server | StatusCategory::Error => {
+                    Style::default().fg(pal.error).add_modifier(Modifier::BOLD)
+                }
+                StatusCategory::Pending => Style::default().fg(pal.muted),
+            };
             let row = Row::new(vec![
                 Cell::from(r.model_name.clone()),
                 Cell::from(r.status.label()),
+                Cell::from(Span::styled(code_label, code_style)),
                 Cell::from(format!("{:.1} ms", r.timing.queue_ms)),
                 Cell::from(format!("{:.1} ms", r.timing.request_ms)),
                 Cell::from(ttfb),
@@ -420,7 +459,10 @@ fn draw_waterfall_tab(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette,
 
     let dir_label = if app.waterfall_desc { "▼ Desc" } else { "▲ Asc" };
     let title = format!(
-        " DevTools Network Waterfall [Sort: {} {} · o/←/→: Field · O/v: Order] ",
+        " Waterfall [OK:{} · 429:{} · Err:{} | Sort: {} {} · o/←/→: Field · O/v: Order] ",
+        ok_count,
+        rate_limit_count,
+        err_count,
         app.waterfall_sort.label(),
         dir_label
     );
@@ -428,21 +470,23 @@ fn draw_waterfall_tab(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette,
     let table = Table::new(
         rows,
         [
-            Constraint::Length(22),
+            Constraint::Length(20),
+            Constraint::Length(9),
+            Constraint::Length(13),
+            Constraint::Length(9),
+            Constraint::Length(9),
+            Constraint::Length(9),
             Constraint::Length(10),
             Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(11),
-            Constraint::Length(11),
-            Constraint::Length(10),
-            Constraint::Min(22),
+            Constraint::Length(9),
+            Constraint::Min(16),
         ],
     )
     .header(
         Row::new(vec![
             header_with_sort("Model", app.waterfall_sort == WaterfallSortField::Model, app.waterfall_desc),
             header_with_sort("Status", app.waterfall_sort == WaterfallSortField::Status, app.waterfall_desc),
+            header_with_sort("Code / Err", app.waterfall_sort == WaterfallSortField::Code, app.waterfall_desc),
             header_with_sort("Queue", app.waterfall_sort == WaterfallSortField::Queue, app.waterfall_desc),
             header_with_sort("Request", app.waterfall_sort == WaterfallSortField::Request, app.waterfall_desc),
             header_with_sort("TTFB", app.waterfall_sort == WaterfallSortField::Ttfb, app.waterfall_desc),

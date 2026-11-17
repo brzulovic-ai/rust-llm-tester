@@ -39,13 +39,13 @@ describe('Execution Engine, Suites & History Store', () => {
     vi.restoreAllMocks();
   });
 
-  it('includes all 18 Systems & Reasoning prompts, 4 HTML Games, and 4 Classic Benchmarks', () => {
+  it('includes all 18 Systems & Reasoning prompts, 4 HTML Games, and 5 Classic Benchmarks (with Ping)', () => {
     const sr = PROMPT_SUITES.filter((p) => p.suite === 'systems-reasoning');
     const hg = PROMPT_SUITES.filter((p) => p.suite === 'html-games');
     const cb = PROMPT_SUITES.filter((p) => p.suite === 'classic-benchmarks');
     expect(sr).toHaveLength(18);
     expect(hg).toHaveLength(4);
-    expect(cb).toHaveLength(4);
+    expect(cb).toHaveLength(5);
     expect(SYSTEM_PERSONAS.map((p) => p.name)).toEqual([
       'Concise Expert',
       'Deep Analyst',

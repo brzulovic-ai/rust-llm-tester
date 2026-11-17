@@ -12,7 +12,7 @@ import {
   Volume2,
 } from 'lucide-react';
 import type { ModelRunResult } from '../types/benchmark';
-import { extractHtmlSnippet, formatMs } from '../utils/metrics';
+import { classifyResultStatus, extractHtmlSnippet, formatMs } from '../utils/metrics';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { TtsPlayer } from './TtsPlayer';
 
@@ -28,6 +28,7 @@ export const ResultCard: React.FC<ResultCardProps> = ({ result, onRetry }) => {
   const [copied, setCopied] = useState(false);
 
   const htmlSnippet = useMemo(() => extractHtmlSnippet(result.output), [result.output]);
+  const statusInfo = useMemo(() => classifyResultStatus(result), [result]);
 
   const handleCopy = () => {
     if (!result.output) return;
@@ -37,12 +38,12 @@ export const ResultCard: React.FC<ResultCardProps> = ({ result, onRetry }) => {
   };
 
   const statusColor =
-    result.status === 'completed'
+    statusInfo.category === 'ok'
       ? 'var(--status-success)'
+      : statusInfo.category === 'rate-limit' || statusInfo.category === 'quota' || statusInfo.category === 'timeout' || statusInfo.category === 'aborted'
+      ? 'var(--status-warning)'
       : result.status === 'error'
       ? 'var(--status-error)'
-      : result.status === 'aborted'
-      ? 'var(--status-warning)'
       : 'var(--accent-primary)';
 
   const statusLabel =
@@ -99,6 +100,23 @@ export const ResultCard: React.FC<ResultCardProps> = ({ result, onRetry }) => {
               {isRunning && <Loader2 className="w-3 h-3 animate-spin" />}
               <span>{statusLabel}</span>
             </span>
+            {!isRunning && result.status !== 'idle' && (
+              <span
+                className="px-1.5 py-0.5 rounded border text-[10px] font-mono tabular-nums font-semibold"
+                style={{
+                  color: statusColor,
+                  borderColor: statusColor,
+                  backgroundColor:
+                    statusInfo.category === 'rate-limit'
+                      ? 'rgba(245, 158, 11, 0.16)'
+                      : statusInfo.category === 'ok'
+                      ? 'rgba(22, 163, 74, 0.10)'
+                      : 'rgba(239, 68, 68, 0.10)',
+                }}
+              >
+                {statusInfo.badgeText}
+              </span>
+            )}
           </div>
 
           {/* Unboxed Tabular Metrics */}

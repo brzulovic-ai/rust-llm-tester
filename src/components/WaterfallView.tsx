@@ -1,17 +1,60 @@
 import React, { useMemo, useState } from 'react';
 import { ArrowUpDown } from 'lucide-react';
 import type { ModelRunResult } from '../types/benchmark';
-import { formatMs } from '../utils/metrics';
+import { classifyResultStatus, formatMs, type StatusCategory } from '../utils/metrics';
 
 interface WaterfallViewProps {
   results: ModelRunResult[];
 }
 
-type SortField = 'totalMs' | 'ttfbMs' | 'tokensPerSec' | 'modelName';
+type SortField = 'totalMs' | 'ttfbMs' | 'tokensPerSec' | 'modelName' | 'errorCode';
+type WaterfallFilter = 'all' | 'working' | 'rate-limit' | 'errors';
+
+function getCategoryStyle(category: StatusCategory): React.CSSProperties {
+  switch (category) {
+    case 'ok':
+      return {
+        color: 'var(--status-success)',
+        backgroundColor: 'rgba(22, 163, 74, 0.12)',
+        borderColor: 'rgba(22, 163, 74, 0.35)',
+      };
+    case 'rate-limit':
+      return {
+        color: 'var(--status-warning)',
+        backgroundColor: 'rgba(245, 158, 11, 0.18)',
+        borderColor: 'rgba(245, 158, 11, 0.5)',
+      };
+    case 'quota':
+    case 'timeout':
+    case 'aborted':
+      return {
+        color: 'var(--status-warning)',
+        backgroundColor: 'rgba(245, 158, 11, 0.12)',
+        borderColor: 'rgba(245, 158, 11, 0.35)',
+      };
+    case 'auth':
+    case 'not-found':
+    case 'bad-request':
+    case 'server':
+    case 'error':
+      return {
+        color: 'var(--status-error)',
+        backgroundColor: 'rgba(239, 68, 68, 0.14)',
+        borderColor: 'rgba(239, 68, 68, 0.4)',
+      };
+    default:
+      return {
+        color: 'var(--text-muted)',
+        backgroundColor: 'transparent',
+        borderColor: 'var(--border-subtle)',
+      };
+  }
+}
 
 export const WaterfallView: React.FC<WaterfallViewProps> = ({ results }) => {
   const [sortField, setSortField] = useState<SortField>('totalMs');
   const [sortAsc, setSortAsc] = useState<boolean>(true);
+  const [statusFilter, setStatusFilter] = useState<WaterfallFilter>('all');
   const [hoveredId, setHoveredId] = useState<string | null>(null);
 
   const handleSort = (field: SortField) => {
@@ -23,7 +66,32 @@ export const WaterfallView: React.FC<WaterfallViewProps> = ({ results }) => {
     }
   };
 
+  const counts = useMemo(() => {
+    let working = 0;
+    let rateLimited = 0;
+    let errors = 0;
+    for (const r of results) {
+      const cls = classifyResultStatus(r);
+      if (cls.category === 'ok') working++;
+      else if (cls.category === 'rate-limit') {
+        rateLimited++;
+        errors++;
+      } else if (r.status === 'error') {
+        errors++;
+      }
+    }
+    return { total: results.length, working, rateLimited, errors };
+  }, [results]);
+
   const { sorted, maxTotalMs, minEnqueuedAt } = useMemo(() => {
+    const filtered = results.filter((r) => {
+      if (statusFilter === 'all') return true;
+      const cls = classifyResultStatus(r);
+      if (statusFilter === 'working') return cls.category === 'ok';
+      if (statusFilter === 'rate-limit') return cls.category === 'rate-limit';
+      return r.status === 'error';
+    });
+
     const minEnq = results.reduce(
       (min, r) => (r.timing.enqueuedAt > 0 && r.timing.enqueuedAt < min ? r.timing.enqueuedAt : min),
       results[0]?.timing.enqueuedAt ?? 0
@@ -37,10 +105,16 @@ export const WaterfallView: React.FC<WaterfallViewProps> = ({ results }) => {
       })
     );
 
-    const list = [...results].sort((a, b) => {
+    const list = [...filtered].sort((a, b) => {
       let cmp = 0;
       if (sortField === 'modelName') {
         cmp = a.modelName.localeCompare(b.modelName);
+      } else if (sortField === 'errorCode') {
+        const ca = classifyResultStatus(a);
+        const cb = classifyResultStatus(b);
+        const na = ca.httpCode ?? (ca.category === 'ok' ? 200 : 999);
+        const nb = cb.httpCode ?? (cb.category === 'ok' ? 200 : 999);
+        cmp = na - nb || ca.badgeText.localeCompare(cb.badgeText);
       } else if (sortField === 'ttfbMs') {
         cmp = (a.timing.ttfbMs ?? Number.MAX_SAFE_INTEGER) - (b.timing.ttfbMs ?? Number.MAX_SAFE_INTEGER);
       } else if (sortField === 'tokensPerSec') {
@@ -52,7 +126,7 @@ export const WaterfallView: React.FC<WaterfallViewProps> = ({ results }) => {
     });
 
     return { sorted: list, maxTotalMs: maxSpan, minEnqueuedAt: minEnq };
-  }, [results, sortField, sortAsc]);
+  }, [results, sortField, sortAsc, statusFilter]);
 
   if (results.length === 0) {
     return (
@@ -79,9 +153,9 @@ export const WaterfallView: React.FC<WaterfallViewProps> = ({ results }) => {
         backgroundColor: 'var(--bg-surface)',
       }}
     >
-      {/* Legend */}
+      {/* Legend & Quick Status Filters */}
       <div
-        className="px-4 py-3 border-b flex flex-wrap items-center justify-between gap-4 text-xs"
+        className="px-4 py-3 border-b flex flex-wrap items-center justify-between gap-3 text-xs"
         style={{ borderColor: 'var(--border-subtle)', backgroundColor: 'var(--bg-elevated)' }}
       >
         <div className="flex flex-wrap items-center gap-4">
@@ -103,9 +177,52 @@ export const WaterfallView: React.FC<WaterfallViewProps> = ({ results }) => {
             </span>
           </div>
         </div>
-        <span className="font-mono tabular-nums" style={{ color: 'var(--text-muted)' }}>
-          Window: {formatMs(maxTotalMs)}
-        </span>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <div
+            className="inline-flex items-center gap-1 p-0.5 rounded-md border"
+            style={{ borderColor: 'var(--border-subtle)', backgroundColor: 'var(--bg-surface)' }}
+            role="group"
+            aria-label="Filter models by status"
+          >
+            {(
+              [
+                { id: 'all', label: `All (${counts.total})` },
+                { id: 'working', label: `Working (${counts.working})` },
+                { id: 'rate-limit', label: `429 Rate Limit (${counts.rateLimited})` },
+                { id: 'errors', label: `Errors (${counts.errors})` },
+              ] as const
+            ).map((f) => {
+              const active = statusFilter === f.id;
+              return (
+                <button
+                  key={f.id}
+                  type="button"
+                  onClick={() => setStatusFilter(f.id)}
+                  className="px-2 py-1 rounded text-[11px] font-medium cursor-pointer whitespace-nowrap"
+                  style={{
+                    backgroundColor: active ? 'var(--accent-soft)' : 'transparent',
+                    color: active
+                      ? f.id === 'rate-limit'
+                        ? 'var(--status-warning)'
+                        : f.id === 'errors'
+                        ? 'var(--status-error)'
+                        : f.id === 'working'
+                        ? 'var(--status-success)'
+                        : 'var(--accent-primary)'
+                      : 'var(--text-muted)',
+                  }}
+                >
+                  {f.label}
+                </button>
+              );
+            })}
+          </div>
+
+          <span className="font-mono tabular-nums" style={{ color: 'var(--text-muted)' }}>
+            Window: {formatMs(maxTotalMs)}
+          </span>
+        </div>
       </div>
 
       {/* Table */}
@@ -123,6 +240,16 @@ export const WaterfallView: React.FC<WaterfallViewProps> = ({ results }) => {
                   className="inline-flex items-center gap-1 cursor-pointer hover:opacity-80"
                 >
                   <span>Model</span>
+                  <ArrowUpDown className="w-3 h-3" />
+                </button>
+              </th>
+              <th className="px-3 py-2.5 font-medium">
+                <button
+                  type="button"
+                  onClick={() => handleSort('errorCode')}
+                  className="inline-flex items-center gap-1 cursor-pointer hover:opacity-80"
+                >
+                  <span>Code / Error</span>
                   <ArrowUpDown className="w-3 h-3" />
                 </button>
               </th>
@@ -159,7 +286,7 @@ export const WaterfallView: React.FC<WaterfallViewProps> = ({ results }) => {
                   <ArrowUpDown className="w-3 h-3" />
                 </button>
               </th>
-              <th className="px-4 py-2.5 font-medium min-w-[260px]">Timeline</th>
+              <th className="px-4 py-2.5 font-medium min-w-[220px]">Timeline</th>
             </tr>
           </thead>
           <tbody>
@@ -170,6 +297,15 @@ export const WaterfallView: React.FC<WaterfallViewProps> = ({ results }) => {
               const waitMs = r.timing.ttfbMs !== null ? r.timing.ttfbMs : r.timing.requestMs;
               const waitPct = (waitMs / maxTotalMs) * 100;
               const downloadPct = (r.timing.downloadMs / maxTotalMs) * 100;
+              const statusInfo = classifyResultStatus(r);
+              const rowHighlightBg =
+                hoveredId === r.targetId
+                  ? 'var(--bg-elevated)'
+                  : statusInfo.category === 'rate-limit'
+                  ? 'rgba(245, 158, 11, 0.06)'
+                  : r.status === 'error'
+                  ? 'rgba(239, 68, 68, 0.05)'
+                  : 'transparent';
 
               return (
                 <tr
@@ -179,8 +315,7 @@ export const WaterfallView: React.FC<WaterfallViewProps> = ({ results }) => {
                   className="border-b last:border-b-0 transition-colors"
                   style={{
                     borderColor: 'var(--border-subtle)',
-                    backgroundColor:
-                      hoveredId === r.targetId ? 'var(--bg-elevated)' : 'transparent',
+                    backgroundColor: rowHighlightBg,
                   }}
                 >
                   <td className="px-4 py-2.5">
@@ -189,6 +324,24 @@ export const WaterfallView: React.FC<WaterfallViewProps> = ({ results }) => {
                     </div>
                     <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
                       {r.providerName} · {r.status}
+                    </div>
+                  </td>
+                  <td className="px-3 py-2.5" title={r.error || r.advice || statusInfo.badgeText}>
+                    <div className="flex flex-col gap-0.5 items-start">
+                      <span
+                        className="inline-block px-1.5 py-0.5 rounded border text-[11px] font-mono tabular-nums font-semibold whitespace-nowrap"
+                        style={getCategoryStyle(statusInfo.category)}
+                      >
+                        {statusInfo.badgeText}
+                      </span>
+                      {r.error && (
+                        <span
+                          className="text-[11px] truncate max-w-[200px]"
+                          style={{ color: 'var(--text-muted)' }}
+                        >
+                          {r.error}
+                        </span>
+                      )}
                     </div>
                   </td>
                   <td className="px-3 py-2.5 text-right font-mono tabular-nums" style={{ color: 'var(--text-secondary)' }}>
@@ -242,6 +395,13 @@ export const WaterfallView: React.FC<WaterfallViewProps> = ({ results }) => {
                 </tr>
               );
             })}
+            {sorted.length === 0 && (
+              <tr>
+                <td colSpan={9} className="px-4 py-6 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
+                  No models match this status filter.
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -259,6 +419,8 @@ export const WaterfallView: React.FC<WaterfallViewProps> = ({ results }) => {
           <span className="font-semibold" style={{ color: 'var(--text-primary)' }}>
             {hoveredResult.modelName}
           </span>
+          <span>Code: {classifyResultStatus(hoveredResult).badgeText}</span>
+          <span>·</span>
           <span>Queue: {hoveredResult.timing.queueMs.toFixed(2)}ms</span>
           <span>·</span>
           <span>Headers: {hoveredResult.timing.requestMs.toFixed(2)}ms</span>
@@ -277,6 +439,14 @@ export const WaterfallView: React.FC<WaterfallViewProps> = ({ results }) => {
           <span>
             Tokens: {hoveredResult.promptTokens} in / {hoveredResult.completionTokens} out
           </span>
+          {hoveredResult.error && (
+            <>
+              <span>·</span>
+              <span className="truncate max-w-md" style={{ color: 'var(--status-error)' }}>
+                {hoveredResult.error}
+              </span>
+            </>
+          )}
         </div>
       )}
     </div>

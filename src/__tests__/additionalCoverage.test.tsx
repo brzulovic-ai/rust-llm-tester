@@ -281,7 +281,7 @@ describe('Extended Coverage Suite (50+ Target)', () => {
     fireEvent.click(screen.getByRole('button', { name: /HTML Games \(4\)/i }));
     expect(screen.getByText(/Single-File Retro Breakout Arcade/i)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /Classic \(4\)/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Classic \(5\)/i }));
     expect(screen.getByText(/Multi-Step Logic & Constraint Grid/i)).toBeInTheDocument();
   });
 
@@ -582,5 +582,73 @@ describe('Extended Coverage Suite (50+ Target)', () => {
     fireEvent.click(resetBtn);
     expect(resetBtn).toHaveTextContent('16px');
     expect(document.documentElement.style.fontSize).toBe('16px');
+  });
+
+  it('loads Ping dummy prompt in one click and highlights HTTP error / rate-limit codes in WaterfallView', async () => {
+    const { classifyResultStatus } = await import('../utils/metrics');
+    const baseTiming = {
+      enqueuedAt: 10,
+      startedAt: 12,
+      headersAt: 40,
+      firstTokenAt: 60,
+      completedAt: 110,
+      queueMs: 2,
+      requestMs: 28,
+      ttfbMs: 48,
+      downloadMs: 50,
+      totalMs: 100,
+    };
+
+    const okRes = {
+      targetId: 't-ok',
+      modelName: 'free-model-ok',
+      providerName: 'OpenRouter',
+      providerKind: 'openai' as const,
+      status: 'completed' as const,
+      output: 'pong',
+      promptTokens: 5,
+      completionTokens: 1,
+      totalTokens: 6,
+      tokensPerSec: 20,
+      timing: baseTiming,
+      httpStatus: 200,
+    };
+    const rateRes = {
+      ...okRes,
+      targetId: 't-429',
+      modelName: 'free-model-429',
+      status: 'error' as const,
+      output: '',
+      httpStatus: 429,
+      error: 'Too many requests: free tier RPM exceeded',
+    };
+    const authRes = {
+      ...okRes,
+      targetId: 't-401',
+      modelName: 'free-model-401',
+      status: 'error' as const,
+      output: '',
+      httpStatus: 401,
+      error: 'Invalid API key provided',
+    };
+
+    expect(classifyResultStatus(okRes).badgeText).toBe('200 OK');
+    expect(classifyResultStatus(rateRes).category).toBe('rate-limit');
+    expect(classifyResultStatus(rateRes).badgeText).toBe('429 RATE LIMIT');
+    expect(classifyResultStatus(authRes).badgeText).toBe('401 AUTH');
+
+    render(<WaterfallView results={[okRes, rateRes, authRes]} />);
+    expect(screen.getByText('Code / Error')).toBeInTheDocument();
+    expect(screen.getByText('200 OK')).toBeInTheDocument();
+    expect(screen.getByText('429 RATE LIMIT')).toBeInTheDocument();
+    expect(screen.getByText('401 AUTH')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '429 Rate Limit (1)' }));
+    expect(screen.getByText('free-model-429')).toBeInTheDocument();
+    expect(screen.queryByText('free-model-ok')).not.toBeInTheDocument();
+
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Load ping test prompt' }));
+    expect(screen.getByDisplayValue('Reply with exactly "pong" and nothing else.')).toBeInTheDocument();
   });
 });
