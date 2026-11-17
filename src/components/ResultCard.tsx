@@ -73,55 +73,56 @@ export const ResultCard: React.FC<ResultCardProps> = ({ result, onRetry }) => {
     >
       {/* Card Header */}
       <div
-        className="px-4 py-3 border-b flex flex-wrap items-center justify-between gap-3"
+        className="px-4 py-3 border-b flex items-center justify-between gap-3"
         style={{ borderColor: 'var(--border-subtle)' }}
       >
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <h3
-              className="text-sm font-semibold font-display truncate"
-              style={{ color: 'var(--text-primary)' }}
-            >
-              {result.modelName}
-            </h3>
-            <span className="text-xs" style={{ color: 'var(--text-muted)' }} aria-hidden="true">
-              ·
-            </span>
-            <span className="text-xs truncate" style={{ color: 'var(--text-muted)' }}>
-              {result.providerName}
-            </span>
-            <span className="text-xs" style={{ color: 'var(--text-muted)' }} aria-hidden="true">
-              ·
-            </span>
+        <div className="min-w-0 flex-1 flex items-center gap-2 overflow-x-auto whitespace-nowrap">
+          <h3
+            className="text-sm font-semibold font-display truncate shrink-0 max-w-[200px]"
+            title={result.modelName}
+            style={{ color: 'var(--text-primary)' }}
+          >
+            {result.modelName}
+          </h3>
+          <span className="text-xs shrink-0" style={{ color: 'var(--text-muted)' }} aria-hidden="true">
+            ·
+          </span>
+          <span className="text-xs truncate shrink-0 max-w-[120px]" style={{ color: 'var(--text-muted)' }}>
+            {result.providerName}
+          </span>
+          <span className="text-xs shrink-0" style={{ color: 'var(--text-muted)' }} aria-hidden="true">
+            ·
+          </span>
+          <span
+            className="inline-flex items-center gap-1 text-xs font-medium shrink-0"
+            style={{ color: statusColor }}
+          >
+            {isRunning && <Loader2 className="w-3 h-3 animate-spin" />}
+            <span>{statusLabel}</span>
+          </span>
+          {!isRunning && result.status !== 'idle' && (
             <span
-              className="inline-flex items-center gap-1 text-xs font-medium"
-              style={{ color: statusColor }}
+              className="px-1.5 py-0.5 rounded border text-[10px] font-mono tabular-nums font-semibold shrink-0"
+              style={{
+                color: statusColor,
+                borderColor: statusColor,
+                backgroundColor:
+                  statusInfo.category === 'rate-limit'
+                    ? 'rgba(245, 158, 11, 0.16)'
+                    : statusInfo.category === 'ok'
+                    ? 'rgba(22, 163, 74, 0.10)'
+                    : 'rgba(239, 68, 68, 0.10)',
+              }}
             >
-              {isRunning && <Loader2 className="w-3 h-3 animate-spin" />}
-              <span>{statusLabel}</span>
+              {statusInfo.badgeText}
             </span>
-            {!isRunning && result.status !== 'idle' && (
-              <span
-                className="px-1.5 py-0.5 rounded border text-[10px] font-mono tabular-nums font-semibold"
-                style={{
-                  color: statusColor,
-                  borderColor: statusColor,
-                  backgroundColor:
-                    statusInfo.category === 'rate-limit'
-                      ? 'rgba(245, 158, 11, 0.16)'
-                      : statusInfo.category === 'ok'
-                      ? 'rgba(22, 163, 74, 0.10)'
-                      : 'rgba(239, 68, 68, 0.10)',
-                }}
-              >
-                {statusInfo.badgeText}
-              </span>
-            )}
-          </div>
-
-          {/* Unboxed Tabular Metrics */}
-          <div
-            className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs font-mono tabular-nums"
+          )}
+          <span className="text-xs shrink-0" style={{ color: 'var(--text-muted)' }} aria-hidden="true">
+            ·
+          </span>
+          <span
+            data-testid="card-inline-metrics"
+            className="inline-flex items-center gap-1.5 text-xs font-mono tabular-nums whitespace-nowrap shrink-0"
             style={{ color: 'var(--text-muted)' }}
           >
             <span>TTFB {formatMs(result.timing.ttfbMs)}</span>
@@ -134,12 +135,12 @@ export const ResultCard: React.FC<ResultCardProps> = ({ result, onRetry }) => {
             {result.endpointUrl && (
               <>
                 <span aria-hidden="true">·</span>
-                <span className="truncate max-w-[220px]" title={result.endpointUrl}>
+                <span className="truncate max-w-[180px]" title={result.endpointUrl}>
                   {result.endpointUrl}
                 </span>
               </>
             )}
-          </div>
+          </span>
         </div>
 
         {/* Actions */}

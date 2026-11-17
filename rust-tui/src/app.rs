@@ -1303,12 +1303,7 @@ impl AppState {
                 }
             }
             ActiveTab::Waterfall => {
-                self.waterfall_desc = !self.waterfall_desc;
-                self.status_message = format!(
-                    "Waterfall sort: {} ({})",
-                    self.waterfall_sort.label(),
-                    if self.waterfall_desc { "desc" } else { "asc" }
-                );
+                self.open_waterfall_selected_response();
             }
             ActiveTab::ConfigEditor => match self.config_focus {
                 ConfigFocus::Providers => {
@@ -1354,6 +1349,27 @@ impl AppState {
             },
             _ => {}
         }
+    }
+
+    pub fn open_waterfall_selected_response(&mut self) {
+        let sorted = self.sorted_waterfall_results();
+        if sorted.is_empty() {
+            return;
+        }
+        let clamped_idx = self.waterfall_selected_idx.min(sorted.len() - 1);
+        let chosen = &sorted[clamped_idx];
+        let ordered = self.ordered_results();
+        let response_idx = ordered
+            .iter()
+            .position(|r| r.target_id == chosen.target_id)
+            .unwrap_or(0);
+        self.selected_result_idx = response_idx;
+        self.output_scroll = 0;
+        self.active_tab = ActiveTab::Responses;
+        self.status_message = format!(
+            "Opened response for {} ({})",
+            chosen.model_name, chosen.provider_name
+        );
     }
 
     fn solo_selected_subgroup(&mut self) {
@@ -1512,8 +1528,17 @@ impl AppState {
                             {
                                 let idx = self.layout_zones.waterfall_offset
                                     + (row - (area.y + 2)) as usize;
-                                if idx < self.ordered_results().len() {
-                                    self.waterfall_selected_idx = idx;
+                                let sorted = self.sorted_waterfall_results();
+                                if idx < sorted.len() {
+                                    if self.waterfall_selected_idx == idx {
+                                        self.open_waterfall_selected_response();
+                                    } else {
+                                        self.waterfall_selected_idx = idx;
+                                        self.status_message = format!(
+                                            "Selected {} (press Enter/Space or click again to open response)",
+                                            sorted[idx].model_name
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -1888,6 +1913,61 @@ mod tests {
         assert_eq!(count, 1);
         assert_eq!(app.run_title, "Imported JSON Run");
         assert!(app.ordered_results().iter().any(|r| r.model_name == "qwen-free"));
+    }
+
+    #[test]
+    fn waterfall_enter_and_space_open_selected_response() {
+        let mut app = test_app();
+        app.results.insert(
+            app.config.targets[0].id.clone(),
+            ModelRunResult {
+                target_id: app.config.targets[0].id.clone(),
+                model_name: app.config.targets[0].model.clone(),
+                provider_name: "Ollama".into(),
+                status: RunStatus::Completed,
+                output: "First output".into(),
+                prompt_tokens: 1,
+                completion_tokens: 2,
+                total_tokens: 3,
+                tokens_per_sec: 10.0,
+                timing: Default::default(),
+                http_status: Some(200),
+                error: None,
+                advice: None,
+            },
+        );
+        app.results.insert(
+            app.config.targets[1].id.clone(),
+            ModelRunResult {
+                target_id: app.config.targets[1].id.clone(),
+                model_name: app.config.targets[1].model.clone(),
+                provider_name: "Ollama".into(),
+                status: RunStatus::Completed,
+                output: "Second output".into(),
+                prompt_tokens: 1,
+                completion_tokens: 2,
+                total_tokens: 3,
+                tokens_per_sec: 50.0,
+                timing: Default::default(),
+                http_status: Some(200),
+                error: None,
+                advice: None,
+            },
+        );
+
+        app.active_tab = ActiveTab::Waterfall;
+        app.waterfall_sort = WaterfallSortField::Speed;
+        app.waterfall_desc = true;
+        app.waterfall_selected_idx = 0;
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.active_tab, ActiveTab::Responses);
+        assert_eq!(app.selected_result_idx, 1);
+
+        app.active_tab = ActiveTab::Waterfall;
+        app.waterfall_selected_idx = 1;
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(app.active_tab, ActiveTab::Responses);
+        assert_eq!(app.selected_result_idx, 0);
     }
 }
 

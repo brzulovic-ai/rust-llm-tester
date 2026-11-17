@@ -144,7 +144,7 @@ fn draw_footer(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect
         ActiveTab::PromptSuites if app.editing_prompt => "EDIT MODE: Type prompt · Esc or Click Outside Exit Edit",
         ActiveTab::PromptSuites => "↑/↓/Click Preview Suite · Enter/2xClick Load · i Edit · r Run · t Theme · q Quit",
         ActiveTab::Responses => "↑/↓/Click Target · Wheel/PgUp/PgDn (J/K) Scroll Output · r Run · R Retry · x Abort",
-        ActiveTab::Waterfall => "Click Header or o/←/→ Sort · O/v/Space Asc/Desc · Wheel/↑/↓ Scroll · r Run · e Export",
+        ActiveTab::Waterfall => "Enter/Space/2xClick Open Response · Click Header or o/←/→ Sort · O/v Asc/Desc · Wheel/↑/↓ Scroll · r Run",
         ActiveTab::ConfigEditor if app.editing_subgroup_name => {
             "SUBGROUP NAME: Type name (or Enter for filter name) · Ctrl+U Clear · Enter Save TOML · Esc Cancel"
         }

@@ -794,5 +794,11 @@ describe('Extended Coverage Suite (50+ Target)', () => {
     expect(await screen.findByText(/Imported "Imported Free Models Run" \(1 result\) from results\.json\./i)).toBeInTheDocument();
     expect(screen.getByText('Imported Free Models Run')).toBeInTheDocument();
     expect(screen.getByText('pong imported!')).toBeInTheDocument();
+    const headerRow = screen.getByText('qwen3-free-imported').parentElement;
+    expect(headerRow).toHaveClass('whitespace-nowrap');
+    expect(headerRow?.textContent).toContain('TTFB 29 ms');
+    expect(headerRow?.textContent).toContain('75 tok/s');
+    expect(headerRow?.textContent).toContain('2 out tok');
+    expect(headerRow?.textContent).toContain('Total 59 ms');
   });
 });
