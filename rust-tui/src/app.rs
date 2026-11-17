@@ -629,7 +629,8 @@ impl AppState {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(1);
-            Self::shuffle_targets_in_place(&mut targets, nanos ^ (targets.len() as u64));
+            let target_len_seed = targets.len() as u64;
+            Self::shuffle_targets_in_place(&mut targets, nanos ^ target_len_seed);
         }
 
         if !retry_failed_only {

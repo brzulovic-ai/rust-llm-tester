@@ -146,10 +146,10 @@ fn value_as_string(obj: &serde_json::Map<String, serde_json::Value>, keys: &[&st
     fallback.to_string()
 }
 
-fn value_as_u32(obj: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> u32 {
+fn value_as_u64(obj: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> u64 {
     for k in keys {
         if let Some(v) = obj.get(*k).and_then(|v| v.as_u64()) {
-            return v as u32;
+            return v;
         }
     }
     0
@@ -266,11 +266,11 @@ pub fn import_bundle_json(raw: &str) -> Result<BenchmarkRunRecord> {
             provider_name: value_as_string(r, &["providerName", "provider_name"], "Imported"),
             status: parse_status_lossy(&status_raw),
             output: value_as_string(r, &["output"], ""),
-            prompt_tokens: value_as_u32(r, &["promptTokens", "prompt_tokens"]),
-            completion_tokens: value_as_u32(r, &["completionTokens", "completion_tokens"]),
-            total_tokens: value_as_u32(r, &["totalTokens", "total_tokens"]),
+            prompt_tokens: value_as_u64(r, &["promptTokens", "prompt_tokens"]),
+            completion_tokens: value_as_u64(r, &["completionTokens", "completion_tokens"]),
+            total_tokens: value_as_u64(r, &["totalTokens", "total_tokens"]),
             tokens_per_sec: value_as_f64(r, &["tokensPerSec", "tokens_per_sec"]).unwrap_or(0.0),
-            timing: crate::engine::TimingMetrics {
+            timing: crate::engine::TimingBreakdown {
                 offset_ms,
                 queue_ms,
                 request_ms,
