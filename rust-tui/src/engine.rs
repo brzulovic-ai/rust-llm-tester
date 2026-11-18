@@ -264,11 +264,62 @@ pub fn build_advice(status: Option<u16>, err_text: &str, base_url: &str) -> Stri
         );
     }
     match status {
+        Some(400) => "Bad request (400). Verify model parameters (temperature/top_p/max_tokens) or payload format.".to_string(),
         Some(401 | 403) => "Verify api_key_env or custom_headers Authorization token.".to_string(),
         Some(404) => format!("Verify base_url ({}) includes /v1 and model ID exists.", base_url),
         Some(429) => "Rate limited (429). Lower execution.concurrency or retry.".to_string(),
         _ => "Inspect provider base_url, model name, and network connectivity.".to_string(),
     }
+}
+
+pub fn model_disallows_sampling_params(model: &str) -> bool {
+    let clean = model
+        .trim()
+        .to_ascii_lowercase()
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .to_string();
+    clean == "o1"
+        || clean.starts_with("o1-")
+        || clean == "o3"
+        || clean.starts_with("o3-")
+        || clean == "o4"
+        || clean.starts_with("o4-")
+        || clean == "gpt-5"
+        || clean.starts_with("gpt-5-")
+        || clean.starts_with("gpt-5.")
+        || clean == "deepseek-reasoner"
+}
+
+pub fn strip_rejected_sampling_params(payload: &mut serde_json::Value, err_body: &str) -> bool {
+    let lower = err_body.to_ascii_lowercase();
+    let mentions_temp = lower.contains("temperature")
+        || lower.contains("sampling")
+        || (lower.contains("unsupported") && lower.contains("parameter"));
+    let mentions_top_p = lower.contains("top_p") || lower.contains("topp");
+    let mentions_max_tokens = lower.contains("max_tokens")
+        && (lower.contains("max_completion_tokens")
+            || lower.contains("unsupported")
+            || lower.contains("not supported"));
+
+    let Some(obj) = payload.as_object_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    if (mentions_temp || mentions_top_p) && obj.remove("temperature").is_some() {
+        changed = true;
+    }
+    if (mentions_temp || mentions_top_p) && obj.remove("top_p").is_some() {
+        changed = true;
+    }
+    if mentions_max_tokens {
+        if let Some(max_tok) = obj.remove("max_tokens") {
+            obj.insert("max_completion_tokens".to_string(), max_tok);
+            changed = true;
+        }
+    }
+    changed
 }
 
 #[derive(Debug, Deserialize)]
@@ -627,6 +678,9 @@ async fn run_single_target(
         EndpointType::AudioTranscriptions | EndpointType::AudioTranslations
     ) || (endpoint_type == EndpointType::Custom && !matched_files.is_empty());
 
+    let disallow_sampling = model_disallows_sampling_params(&target.model);
+    let mut json_body_opt: Option<serde_json::Value> = None;
+
     let request_builder = if use_multipart {
         if matches!(
             endpoint_type,
@@ -691,7 +745,7 @@ async fn run_single_target(
             .map(|(fld, name, mime, data)| (fld.as_str(), name.as_str(), mime.as_str(), data.as_slice()))
             .collect();
         let multipart_bytes = build_multipart_body(&boundary, &fields, &file_refs);
-        client.post(&url).headers(headers).body(multipart_bytes)
+        client.post(&url).headers(headers.clone()).body(multipart_bytes)
     } else {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         let body = match endpoint_type {
@@ -716,8 +770,10 @@ async fn run_single_target(
                     "model": target.model,
                     "input": effective_prompt,
                     "stream": false,
-                    "temperature": cfg.execution.temperature,
                 });
+                if !disallow_sampling {
+                    payload["temperature"] = serde_json::json!(cfg.execution.temperature);
+                }
                 if let Some(ref sys) = sys_prompt {
                     payload["instructions"] = serde_json::json!(sys);
                 }
@@ -726,20 +782,27 @@ async fn run_single_target(
                 }
                 payload
             }
-            EndpointType::Custom => serde_json::json!({
-                "model": target.model,
-                "input": effective_prompt,
-                "messages": messages,
-                "temperature": cfg.execution.temperature,
-            }),
+            EndpointType::Custom => {
+                let mut payload = serde_json::json!({
+                    "model": target.model,
+                    "input": effective_prompt,
+                    "messages": messages,
+                });
+                if !disallow_sampling {
+                    payload["temperature"] = serde_json::json!(cfg.execution.temperature);
+                }
+                payload
+            }
             _ => {
                 let mut payload = serde_json::json!({
                     "model": target.model,
                     "messages": messages,
                     "stream": cfg.execution.stream,
-                    "temperature": cfg.execution.temperature,
-                    "top_p": cfg.execution.top_p,
                 });
+                if !disallow_sampling {
+                    payload["temperature"] = serde_json::json!(cfg.execution.temperature);
+                    payload["top_p"] = serde_json::json!(cfg.execution.top_p);
+                }
                 if cfg.execution.max_tokens > 0 {
                     payload["max_tokens"] = serde_json::json!(cfg.execution.max_tokens);
                 }
@@ -752,7 +815,11 @@ async fn run_single_target(
                 payload
             }
         };
-        client.post(&url).headers(headers).json(&body)
+        json_body_opt = Some(body);
+        client
+            .post(&url)
+            .headers(headers.clone())
+            .json(json_body_opt.as_ref().expect("json payload"))
     };
 
     let resp_res = tokio::select! {
@@ -778,7 +845,7 @@ async fn run_single_target(
         }
     };
 
-    let response = match resp_res {
+    let mut response = match resp_res {
         Ok(r) => r,
         Err(e) => {
             let msg = e.to_string();
@@ -791,19 +858,80 @@ async fn run_single_target(
         }
     };
 
-    let headers_at = Instant::now();
+    let mut headers_at = Instant::now();
     result.timing.request_ms = headers_at.duration_since(dispatched_at).as_secs_f64() * 1000.0;
-    let status_code = response.status().as_u16();
+    let mut status_code = response.status().as_u16();
     result.http_status = Some(status_code);
 
     if !response.status().is_success() {
-        let err_body = response.text().await.unwrap_or_default();
-        result.status = RunStatus::Error;
-        result.timing.total_ms = dispatched_at.elapsed().as_secs_f64() * 1000.0 + queue_ms;
-        result.error = Some(format!("HTTP {} — {}", status_code, &err_body.chars().take(240).collect::<String>()));
-        result.advice = Some(build_advice(Some(status_code), &err_body, &provider.base_url));
-        let _ = tx.send(EngineEvent::Update(result));
-        return;
+        let mut err_body = response.text().await.unwrap_or_default();
+        if status_code == 400 {
+            if let Some(mut retry_json) = json_body_opt.take() {
+                if strip_rejected_sampling_params(&mut retry_json, &err_body) {
+                    let retry_res = tokio::select! {
+                        r = tokio::time::timeout(
+                            timeout_dur,
+                            client.post(&url).headers(headers.clone()).json(&retry_json).send()
+                        ) => {
+                            match r {
+                                Ok(inner) => inner,
+                                Err(_) => {
+                                    result.status = RunStatus::Error;
+                                    result.timing.total_ms = dispatched_at.elapsed().as_secs_f64() * 1000.0 + queue_ms;
+                                    result.error = Some(format!("Request timed out after {}s", cfg.execution.timeout_sec));
+                                    result.advice = Some(build_advice(Some(504), "timed out", &provider.base_url));
+                                    let _ = tx.send(EngineEvent::Update(result));
+                                    return;
+                                }
+                            }
+                        }
+                        _ = abort_rx.changed() => {
+                            result.status = RunStatus::Aborted;
+                            result.timing.total_ms = dispatched_at.elapsed().as_secs_f64() * 1000.0 + queue_ms;
+                            result.error = Some("Aborted by user".to_string());
+                            let _ = tx.send(EngineEvent::Update(result));
+                            return;
+                        }
+                    };
+                    match retry_res {
+                        Ok(retry_resp) => {
+                            headers_at = Instant::now();
+                            result.timing.request_ms =
+                                headers_at.duration_since(dispatched_at).as_secs_f64() * 1000.0;
+                            status_code = retry_resp.status().as_u16();
+                            result.http_status = Some(status_code);
+                            response = retry_resp;
+                            if !response.status().is_success() {
+                                err_body = response.text().await.unwrap_or_default();
+                            }
+                        }
+                        Err(e) => {
+                            let msg = e.to_string();
+                            result.status = RunStatus::Error;
+                            result.timing.total_ms =
+                                dispatched_at.elapsed().as_secs_f64() * 1000.0 + queue_ms;
+                            result.advice = Some(build_advice(None, &msg, &provider.base_url));
+                            result.error = Some(msg);
+                            let _ = tx.send(EngineEvent::Update(result));
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !response.status().is_success() {
+            result.status = RunStatus::Error;
+            result.timing.total_ms = dispatched_at.elapsed().as_secs_f64() * 1000.0 + queue_ms;
+            result.error = Some(format!(
+                "HTTP {} — {}",
+                status_code,
+                &err_body.chars().take(240).collect::<String>()
+            ));
+            result.advice = Some(build_advice(Some(status_code), &err_body, &provider.base_url));
+            let _ = tx.send(EngineEvent::Update(result));
+            return;
+        }
     }
 
     let is_sse = endpoint_type == EndpointType::ChatCompletions
@@ -1040,5 +1168,33 @@ async fn run_single_target(
             }
         }
         let _ = tx.send(EngineEvent::Update(result));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_reasoning_models_and_strips_rejected_temperature_on_400() {
+        assert!(model_disallows_sampling_params("o3-mini"));
+        assert!(model_disallows_sampling_params("openai/o1"));
+        assert!(model_disallows_sampling_params("gpt-5-mini"));
+        assert!(model_disallows_sampling_params("deepseek-reasoner"));
+        assert!(!model_disallows_sampling_params("gpt-4o-mini"));
+
+        let mut payload = serde_json::json!({
+            "model": "some-custom-model",
+            "temperature": 0.7,
+            "top_p": 1.0,
+            "max_tokens": 512,
+        });
+        assert!(strip_rejected_sampling_params(
+            &mut payload,
+            "Unsupported parameter: 'temperature' is not supported with this model."
+        ));
+        assert!(payload.get("temperature").is_none());
+        assert!(payload.get("top_p").is_none());
+        assert!(payload.get("max_tokens").is_some());
     }
 }

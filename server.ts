@@ -58,6 +58,57 @@ function normalizeBaseUrl(raw: string): string {
   return raw.trim().replace(/\/+$/, '');
 }
 
+function modelDisallowsSamplingParams(modelName: string): boolean {
+  const clean = (modelName.trim().toLowerCase().split('/').pop() ?? '').trim();
+  return (
+    clean === 'o1' ||
+    clean.startsWith('o1-') ||
+    clean === 'o3' ||
+    clean.startsWith('o3-') ||
+    clean === 'o4' ||
+    clean.startsWith('o4-') ||
+    clean === 'gpt-5' ||
+    clean.startsWith('gpt-5-') ||
+    clean.startsWith('gpt-5.') ||
+    clean === 'deepseek-reasoner'
+  );
+}
+
+function stripUnsupportedParamsOn400(payload: Record<string, unknown>, errorText: string): boolean {
+  const lower = errorText.toLowerCase();
+  let changed = false;
+
+  const mentionsTemp =
+    lower.includes('temperature') ||
+    lower.includes('sampling') ||
+    (lower.includes('unsupported') && lower.includes('parameter'));
+  const mentionsTopP = lower.includes('top_p') || lower.includes('topp');
+  const mentionsMaxTokens =
+    lower.includes('max_tokens') &&
+    (lower.includes('max_completion_tokens') ||
+      lower.includes('unsupported') ||
+      lower.includes('not supported'));
+
+  if ((mentionsTemp || mentionsTopP) && 'temperature' in payload) {
+    delete payload.temperature;
+    changed = true;
+  }
+  if ((mentionsTemp || mentionsTopP) && 'top_p' in payload) {
+    delete payload.top_p;
+    changed = true;
+  }
+  if ((mentionsTemp || mentionsTopP) && 'topP' in payload) {
+    delete payload.topP;
+    changed = true;
+  }
+  if (mentionsMaxTokens && typeof payload.max_tokens === 'number') {
+    payload.max_completion_tokens = payload.max_tokens;
+    delete payload.max_tokens;
+    changed = true;
+  }
+  return changed;
+}
+
 function buildTroubleshootingAdvice(status: number | null, code: string | undefined, baseUrl: string): string {
   if (code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'ECONNRESET') {
     return `Unable to reach ${baseUrl}. Ensure the server is running and accessible from this host. For local Ollama/LM Studio on your machine, enable "Direct Browser Mode" in Provider Settings.`;
@@ -190,26 +241,47 @@ async function startServer() {
       headers['Authorization'] = `Bearer ${body.apiKey}`;
     }
 
+    const disallowSampling = modelDisallowsSamplingParams(body.model);
     const payload: Record<string, unknown> = {
       model: body.model,
       messages: body.messages,
       stream: body.stream !== false,
     };
-    if (typeof body.temperature === 'number') payload.temperature = body.temperature;
+    if (!disallowSampling && typeof body.temperature === 'number') payload.temperature = body.temperature;
     if (typeof body.maxTokens === 'number' && body.maxTokens > 0) payload.max_tokens = body.maxTokens;
-    if (typeof body.topP === 'number') payload.top_p = body.topP;
+    if (!disallowSampling && typeof body.topP === 'number') payload.top_p = body.topP;
     if (typeof body.seed === 'number') payload.seed = body.seed;
     if (payload.stream) {
       payload.stream_options = { include_usage: true };
     }
 
     try {
-      const upstream = await fetch(`${baseUrl}/chat/completions`, {
+      let upstream = await fetch(`${baseUrl}/chat/completions`, {
         method: 'POST',
         headers,
         body: JSON.stringify(payload),
         signal: controller.signal,
       });
+
+      if (!upstream.ok && upstream.status === 400) {
+        const errorText = await upstream.text();
+        if (stripUnsupportedParamsOn400(payload, errorText)) {
+          upstream = await fetch(`${baseUrl}/chat/completions`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(payload),
+            signal: controller.signal,
+          });
+        } else {
+          clearTimeout(timeoutId);
+          res.status(upstream.status).json({
+            error: `Upstream API error (${upstream.status})`,
+            details: errorText.slice(0, 1200),
+            advice: buildTroubleshootingAdvice(upstream.status, undefined, baseUrl),
+          });
+          return;
+        }
+      }
 
       if (!upstream.ok) {
         clearTimeout(timeoutId);
@@ -350,7 +422,28 @@ async function startServer() {
     }
 
     try {
-      const upstream = await fetch(targetUrl, requestInit);
+      let upstream = await fetch(targetUrl, requestInit);
+      if (!upstream.ok && upstream.status === 400 && !body.multipart && body.jsonBody) {
+        const errorText = await upstream.text();
+        const retryJson: Record<string, unknown> = { ...body.jsonBody };
+        if (stripUnsupportedParamsOn400(retryJson, errorText)) {
+          upstream = await fetch(targetUrl, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(retryJson),
+            signal: controller.signal,
+          });
+        } else {
+          clearTimeout(timeoutId);
+          res.status(upstream.status).json({
+            error: `Upstream API error (${upstream.status})`,
+            details: errorText.slice(0, 1200),
+            advice: buildTroubleshootingAdvice(upstream.status, undefined, targetUrl),
+          });
+          return;
+        }
+      }
+
       if (!upstream.ok) {
         clearTimeout(timeoutId);
         const errorText = await upstream.text();

@@ -52,6 +52,73 @@ export function resolveSystemPromptForTarget(
   return undefined;
 }
 
+export function modelDisallowsSamplingParams(modelName: string): boolean {
+  const clean = (modelName.trim().toLowerCase().split('/').pop() ?? '').trim();
+  return (
+    clean === 'o1' ||
+    clean.startsWith('o1-') ||
+    clean === 'o3' ||
+    clean.startsWith('o3-') ||
+    clean === 'o4' ||
+    clean.startsWith('o4-') ||
+    clean === 'gpt-5' ||
+    clean.startsWith('gpt-5-') ||
+    clean.startsWith('gpt-5.') ||
+    clean === 'deepseek-reasoner'
+  );
+}
+
+export function stripUnsupportedParamsFor400(
+  payload: Record<string, unknown>,
+  errorText: string
+): boolean {
+  const lower = errorText.toLowerCase();
+  let changed = false;
+
+  const mentionsTemp =
+    lower.includes('temperature') ||
+    lower.includes('sampling') ||
+    (lower.includes('unsupported') && lower.includes('parameter'));
+  const mentionsTopP = lower.includes('top_p') || lower.includes('topp');
+  const mentionsMaxTokens =
+    lower.includes('max_tokens') &&
+    (lower.includes('max_completion_tokens') ||
+      lower.includes('unsupported') ||
+      lower.includes('not supported'));
+
+  const stripFromTarget = (obj: Record<string, unknown>): boolean => {
+    let touched = false;
+    if ((mentionsTemp || mentionsTopP) && 'temperature' in obj) {
+      delete obj.temperature;
+      touched = true;
+    }
+    if ((mentionsTemp || mentionsTopP) && 'top_p' in obj) {
+      delete obj.top_p;
+      touched = true;
+    }
+    if ((mentionsTemp || mentionsTopP) && 'topP' in obj) {
+      delete obj.topP;
+      touched = true;
+    }
+    if (mentionsMaxTokens && typeof obj.max_tokens === 'number') {
+      obj.max_completion_tokens = obj.max_tokens;
+      delete obj.max_tokens;
+      touched = true;
+    }
+    return touched;
+  };
+
+  if (stripFromTarget(payload)) {
+    changed = true;
+  }
+  if (payload.jsonBody && typeof payload.jsonBody === 'object' && !Array.isArray(payload.jsonBody)) {
+    if (stripFromTarget(payload.jsonBody as Record<string, unknown>)) {
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 export async function executeSingleTarget(params: RunTargetParams): Promise<ModelRunResult> {
   const {
     target,
@@ -162,16 +229,20 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
       matchedFiles
     );
 
+    const disallowSampling = modelDisallowsSamplingParams(target.modelName);
+    let mutableJsonPayload: Record<string, unknown> | null = null;
+
     if (endpointType === 'chat-completions') {
       if (provider.kind === 'gemini-builtin') {
         fetchTargetUrl = '/api/gemini/chat';
-        fetchBodyPayload = JSON.stringify({
+        mutableJsonPayload = {
           model: target.modelName,
           messages,
           stream: executionConfig.stream,
           timeoutMs,
           seed: executionConfig.seed,
-        });
+        };
+        fetchBodyPayload = JSON.stringify(mutableJsonPayload);
       } else if (provider.directBrowser) {
         fetchTargetUrl = resolvedUrl;
         fetchHeaders = {
@@ -181,31 +252,33 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
         if (provider.apiKey && !fetchHeaders['Authorization'] && !fetchHeaders['authorization']) {
           fetchHeaders['Authorization'] = `Bearer ${provider.apiKey}`;
         }
-        fetchBodyPayload = JSON.stringify({
+        mutableJsonPayload = {
           model: target.modelName,
           messages,
           stream: executionConfig.stream,
-          temperature: executionConfig.temperature,
-          top_p: executionConfig.topP,
+          ...(!disallowSampling ? { temperature: executionConfig.temperature, top_p: executionConfig.topP } : {}),
           ...(executionConfig.maxTokens > 0 ? { max_tokens: executionConfig.maxTokens } : {}),
           ...(typeof executionConfig.seed === 'number' ? { seed: executionConfig.seed } : {}),
           ...(executionConfig.stream ? { stream_options: { include_usage: true } } : {}),
-        });
+        };
+        fetchBodyPayload = JSON.stringify(mutableJsonPayload);
       } else {
         fetchTargetUrl = '/api/proxy/chat';
-        fetchBodyPayload = JSON.stringify({
+        mutableJsonPayload = {
           baseUrl: provider.baseUrl,
           apiKey: provider.apiKey,
           headers: provider.customHeaders,
           model: target.modelName,
           messages,
           stream: executionConfig.stream,
-          temperature: executionConfig.temperature,
+          ...(!disallowSampling
+            ? { temperature: executionConfig.temperature, topP: executionConfig.topP }
+            : {}),
           maxTokens: executionConfig.maxTokens,
-          topP: executionConfig.topP,
           seed: executionConfig.seed,
           timeoutMs,
-        });
+        };
+        fetchBodyPayload = JSON.stringify(mutableJsonPayload);
       }
     } else if (useMultipart) {
       const fields: Record<string, string> = { model: target.modelName };
@@ -272,7 +345,7 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
           model: target.modelName,
           input: effectivePrompt,
           ...(appliedSystemPrompt ? { instructions: appliedSystemPrompt } : {}),
-          temperature: executionConfig.temperature,
+          ...(!disallowSampling ? { temperature: executionConfig.temperature } : {}),
           ...(executionConfig.maxTokens > 0 ? { max_output_tokens: executionConfig.maxTokens } : {}),
           stream: executionConfig.stream,
         };
@@ -281,7 +354,7 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
           model: target.modelName,
           input: effectivePrompt,
           messages,
-          temperature: executionConfig.temperature,
+          ...(!disallowSampling ? { temperature: executionConfig.temperature } : {}),
           ...(executionConfig.maxTokens > 0 ? { max_tokens: executionConfig.maxTokens } : {}),
           ...(matchedFiles.length > 0
             ? {
@@ -305,51 +378,71 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
         if (provider.apiKey && !fetchHeaders['Authorization'] && !fetchHeaders['authorization']) {
           fetchHeaders['Authorization'] = `Bearer ${provider.apiKey}`;
         }
-        fetchBodyPayload = JSON.stringify(jsonBody);
+        mutableJsonPayload = jsonBody;
+        fetchBodyPayload = JSON.stringify(mutableJsonPayload);
       } else {
         fetchTargetUrl = '/api/proxy/endpoint';
-        fetchBodyPayload = JSON.stringify({
+        mutableJsonPayload = {
           endpointUrl: resolvedUrl,
           apiKey: provider.apiKey,
           headers: provider.customHeaders,
           multipart: false,
           jsonBody,
           timeoutMs,
-        });
+        };
+        fetchBodyPayload = JSON.stringify(mutableJsonPayload);
       }
     }
 
-    const response = await fetch(fetchTargetUrl, {
+    let response = await fetch(fetchTargetUrl, {
       method: 'POST',
       headers: fetchHeaders,
       body: fetchBodyPayload,
       signal: combinedController.signal,
     });
 
-    const headersAt = performance.now();
+    let headersAt = performance.now();
     timing = computeTimingMetrics({ ...timing, headersAt }, headersAt);
+
+    let preReadErrBody: string | null = null;
+    if (!response.ok && response.status === 400 && mutableJsonPayload) {
+      preReadErrBody = await response.text().catch(() => '');
+      if (stripUnsupportedParamsFor400(mutableJsonPayload, preReadErrBody)) {
+        response = await fetch(fetchTargetUrl, {
+          method: 'POST',
+          headers: fetchHeaders,
+          body: JSON.stringify(mutableJsonPayload),
+          signal: combinedController.signal,
+        });
+        headersAt = performance.now();
+        timing = computeTimingMetrics({ ...timing, headersAt }, headersAt);
+        preReadErrBody = null;
+      }
+    }
 
     if (!response.ok) {
       let errMessage = `HTTP ${response.status} ${response.statusText}`;
       let advice: string | undefined;
-      try {
-        const errJson = (await response.json()) as {
-          error?: string | { message?: string };
-          details?: string;
-          advice?: string;
-        };
-        if (typeof errJson.error === 'string') {
-          errMessage = errJson.error;
-        } else if (errJson.error?.message) {
-          errMessage = errJson.error.message;
+      const errText = preReadErrBody ?? (await response.text().catch(() => ''));
+      if (errText) {
+        try {
+          const errJson = JSON.parse(errText) as {
+            error?: string | { message?: string };
+            details?: string;
+            advice?: string;
+          };
+          if (typeof errJson.error === 'string') {
+            errMessage = errJson.error;
+          } else if (errJson.error?.message) {
+            errMessage = errJson.error.message;
+          }
+          if (errJson.details) {
+            errMessage += `: ${errJson.details}`;
+          }
+          advice = errJson.advice;
+        } catch {
+          errMessage += `: ${errText.slice(0, 300)}`;
         }
-        if (errJson.details) {
-          errMessage += `: ${errJson.details}`;
-        }
-        advice = errJson.advice;
-      } catch {
-        const text = await response.text().catch(() => '');
-        if (text) errMessage += `: ${text.slice(0, 300)}`;
       }
 
       const completedAt = performance.now();

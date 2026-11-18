@@ -801,4 +801,116 @@ describe('Extended Coverage Suite (50+ Target)', () => {
     expect(headerRow?.textContent).toContain('2 out tok');
     expect(headerRow?.textContent).toContain('Total 59 ms');
   });
+
+  it('omits temperature on reasoning models and retries HTTP 400 temperature rejections without failing', async () => {
+    const { modelDisallowsSamplingParams } = await import('../utils/executionEngine');
+    expect(modelDisallowsSamplingParams('openai/o3-mini')).toBe(true);
+    expect(modelDisallowsSamplingParams('o1-preview')).toBe(true);
+    expect(modelDisallowsSamplingParams('gpt-5-mini')).toBe(true);
+    expect(modelDisallowsSamplingParams('llama-3.3-70b-versatile')).toBe(false);
+
+    const payloads: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      const parsed = JSON.parse(init.body as string) as Record<string, unknown>;
+      payloads.push(parsed);
+      if ('temperature' in parsed) {
+        return {
+          ok: false,
+          status: 400,
+          statusText: 'Bad Request',
+          headers: new Headers({ 'content-type': 'application/json' }),
+          text: async () =>
+            JSON.stringify({
+              error: { message: "Unsupported parameter: 'temperature' is not supported with this model." },
+            }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Headers({ 'content-type': 'application/json' }),
+        text: async () =>
+          JSON.stringify({ choices: [{ message: { content: 'pong-without-temp' } }] }),
+        json: async () => ({ choices: [{ message: { content: 'pong-without-temp' } }] }),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const provider: ProviderEndpoint = {
+      id: 'p-strict',
+      name: 'Strict Provider',
+      kind: 'openai',
+      baseUrl: 'https://api.example.com/v1',
+      apiKey: 'sk-test',
+      customHeaders: {},
+      directBrowser: true,
+      models: ['strict-custom-model', 'o3-mini'],
+    };
+
+    const strictRes = await runExecutionPool({
+      targets: [
+        {
+          id: 't-strict',
+          providerId: 'p-strict',
+          providerName: 'Strict Provider',
+          providerKind: 'openai',
+          modelName: 'strict-custom-model',
+          enabled: true,
+        },
+      ],
+      providers: [provider],
+      prompt: 'ping',
+      systemPrompt: { enabled: false, content: '', personaId: null, targetMode: 'all', targetModelIds: [] },
+      executionConfig: {
+        mode: 'parallel',
+        concurrency: 1,
+        timeoutSec: 30,
+        stream: false,
+        temperature: 0.7,
+        maxTokens: 128,
+        topP: 1,
+      },
+      signal: new AbortController().signal,
+      onResultUpdate: () => {},
+    });
+
+    expect(strictRes[0].status).toBe('completed');
+    expect(strictRes[0].output).toBe('pong-without-temp');
+    expect(payloads).toHaveLength(2);
+    expect(payloads[0]).toHaveProperty('temperature', 0.7);
+    expect(payloads[1]).not.toHaveProperty('temperature');
+    expect(payloads[1]).not.toHaveProperty('top_p');
+
+    const o3Res = await runExecutionPool({
+      targets: [
+        {
+          id: 't-o3',
+          providerId: 'p-strict',
+          providerName: 'Strict Provider',
+          providerKind: 'openai',
+          modelName: 'o3-mini',
+          enabled: true,
+        },
+      ],
+      providers: [provider],
+      prompt: 'ping',
+      systemPrompt: { enabled: false, content: '', personaId: null, targetMode: 'all', targetModelIds: [] },
+      executionConfig: {
+        mode: 'parallel',
+        concurrency: 1,
+        timeoutSec: 30,
+        stream: false,
+        temperature: 0.7,
+        maxTokens: 128,
+        topP: 1,
+      },
+      signal: new AbortController().signal,
+      onResultUpdate: () => {},
+    });
+
+    expect(o3Res[0].status).toBe('completed');
+    expect(payloads).toHaveLength(3);
+    expect(payloads[2]).not.toHaveProperty('temperature');
+  });
 });
