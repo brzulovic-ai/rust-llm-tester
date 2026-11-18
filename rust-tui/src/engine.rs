@@ -845,7 +845,7 @@ async fn run_single_target(
         }
     };
 
-    let mut response = match resp_res {
+    let response = match resp_res {
         Ok(r) => r,
         Err(e) => {
             let msg = e.to_string();
@@ -863,8 +863,10 @@ async fn run_single_target(
     let mut status_code = response.status().as_u16();
     result.http_status = Some(status_code);
 
-    if !response.status().is_success() {
+    let response = if !response.status().is_success() {
         let mut err_body = response.text().await.unwrap_or_default();
+        let mut retry_ok: Option<reqwest::Response> = None;
+
         if status_code == 400 {
             if let Some(mut retry_json) = json_body_opt.take() {
                 if strip_rejected_sampling_params(&mut retry_json, &err_body) {
@@ -900,9 +902,10 @@ async fn run_single_target(
                                 headers_at.duration_since(dispatched_at).as_secs_f64() * 1000.0;
                             status_code = retry_resp.status().as_u16();
                             result.http_status = Some(status_code);
-                            response = retry_resp;
-                            if !response.status().is_success() {
-                                err_body = response.text().await.unwrap_or_default();
+                            if retry_resp.status().is_success() {
+                                retry_ok = Some(retry_resp);
+                            } else {
+                                err_body = retry_resp.text().await.unwrap_or_default();
                             }
                         }
                         Err(e) => {
@@ -920,7 +923,9 @@ async fn run_single_target(
             }
         }
 
-        if !response.status().is_success() {
+        if let Some(ok_resp) = retry_ok {
+            ok_resp
+        } else {
             result.status = RunStatus::Error;
             result.timing.total_ms = dispatched_at.elapsed().as_secs_f64() * 1000.0 + queue_ms;
             result.error = Some(format!(
@@ -932,7 +937,9 @@ async fn run_single_target(
             let _ = tx.send(EngineEvent::Update(result));
             return;
         }
-    }
+    } else {
+        response
+    };
 
     let is_sse = endpoint_type == EndpointType::ChatCompletions
         && cfg.execution.stream
