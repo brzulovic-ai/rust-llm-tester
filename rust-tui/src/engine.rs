@@ -721,6 +721,185 @@ async fn run_single_target(
     .await;
 }
 
+pub fn build_chat_messages(
+    sys_prompt: Option<&str>,
+    effective_prompt: &str,
+    history_messages: Option<&[ChatTurnMessage]>,
+) -> (Vec<serde_json::Value>, u64) {
+    let mut messages = Vec::new();
+    let mut est_prompt_tokens = 0u64;
+
+    if let Some(hist) = history_messages {
+        let filtered: Vec<&ChatTurnMessage> = hist
+            .iter()
+            .filter(|m| {
+                let role_lower = m.role.trim().to_ascii_lowercase();
+                let trimmed = m.content.trim();
+                if role_lower == "assistant"
+                    && (trimmed.is_empty()
+                        || trimmed == "..."
+                        || trimmed.starts_with("ERROR:"))
+                {
+                    return false;
+                }
+                true
+            })
+            .collect();
+
+        if let Some(sys) = sys_prompt {
+            let already_has_sys = filtered
+                .first()
+                .map(|m| m.role.trim().eq_ignore_ascii_case("system"))
+                .unwrap_or(false);
+            if !already_has_sys {
+                est_prompt_tokens += estimate_tokens(sys);
+                messages.push(serde_json::json!({ "role": "system", "content": sys }));
+            }
+        }
+
+        let last_user_pos = filtered
+            .iter()
+            .rposition(|m| m.role.trim().eq_ignore_ascii_case("user"));
+        for (idx, m) in filtered.iter().enumerate() {
+            let role = m.role.trim().to_ascii_lowercase();
+            let content = if Some(idx) == last_user_pos && !effective_prompt.is_empty() {
+                effective_prompt
+            } else {
+                m.content.as_str()
+            };
+            if content.trim().is_empty() {
+                continue;
+            }
+            est_prompt_tokens += estimate_tokens(content);
+            messages.push(serde_json::json!({ "role": role, "content": content }));
+        }
+
+        if last_user_pos.is_none() && !effective_prompt.trim().is_empty() {
+            est_prompt_tokens += estimate_tokens(effective_prompt);
+            messages.push(serde_json::json!({ "role": "user", "content": effective_prompt }));
+        }
+    } else {
+        if let Some(sys) = sys_prompt {
+            est_prompt_tokens += estimate_tokens(sys);
+            messages.push(serde_json::json!({ "role": "system", "content": sys }));
+        }
+        est_prompt_tokens += estimate_tokens(effective_prompt);
+        messages.push(serde_json::json!({ "role": "user", "content": effective_prompt }));
+    }
+
+    (messages, est_prompt_tokens)
+}
+
+pub fn build_endpoint_payload(
+    cfg: &BenchConfig,
+    target: &TargetConfig,
+    sys_prompt: Option<&str>,
+    effective_prompt: &str,
+    messages: &[serde_json::Value],
+    has_history: bool,
+    use_stream: bool,
+    disallow_sampling: bool,
+) -> serde_json::Value {
+    let endpoint_type = cfg.execution.endpoint_type;
+    let act = &cfg.execution.active_params;
+
+    let mut body = match endpoint_type {
+        EndpointType::AudioSpeech => {
+            let mut payload = serde_json::json!({
+                "model": target.model,
+                "input": effective_prompt,
+            });
+            if act.tts_voice {
+                let voice = if cfg.execution.tts_voice.trim().is_empty() {
+                    "alloy"
+                } else {
+                    cfg.execution.tts_voice.trim()
+                };
+                payload["voice"] = serde_json::json!(voice);
+            }
+            payload
+        }
+        EndpointType::Embeddings => serde_json::json!({
+            "model": target.model,
+            "input": effective_prompt,
+        }),
+        EndpointType::Responses => {
+            let non_sys_items: Vec<serde_json::Value> = messages
+                .iter()
+                .filter(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"))
+                .cloned()
+                .collect();
+            let input_value = if (has_history || non_sys_items.len() > 1) && !non_sys_items.is_empty() {
+                serde_json::Value::Array(non_sys_items)
+            } else {
+                serde_json::json!(effective_prompt)
+            };
+            let mut payload = serde_json::json!({
+                "model": target.model,
+                "input": input_value,
+                "stream": false,
+            });
+            if !disallow_sampling && act.temperature {
+                payload["temperature"] = serde_json::json!(cfg.execution.temperature);
+            }
+            if let Some(sys) = sys_prompt {
+                payload["instructions"] = serde_json::json!(sys);
+            } else if let Some(sys_content) = messages
+                .iter()
+                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_str())
+            {
+                payload["instructions"] = serde_json::json!(sys_content);
+            }
+            if act.max_tokens && cfg.execution.max_tokens > 0 {
+                payload["max_output_tokens"] = serde_json::json!(cfg.execution.max_tokens);
+            }
+            payload
+        }
+        EndpointType::Custom => {
+            let mut payload = serde_json::json!({
+                "model": target.model,
+                "input": effective_prompt,
+                "messages": messages,
+            });
+            if !disallow_sampling && act.temperature {
+                payload["temperature"] = serde_json::json!(cfg.execution.temperature);
+            }
+            payload
+        }
+        _ => {
+            let mut payload = serde_json::json!({
+                "model": target.model,
+                "messages": messages,
+                "stream": use_stream,
+            });
+            if !disallow_sampling {
+                if act.temperature {
+                    payload["temperature"] = serde_json::json!(cfg.execution.temperature);
+                }
+                if act.top_p {
+                    payload["top_p"] = serde_json::json!(cfg.execution.top_p);
+                }
+            }
+            if act.max_tokens && cfg.execution.max_tokens > 0 {
+                payload["max_tokens"] = serde_json::json!(cfg.execution.max_tokens);
+            }
+            if act.seed {
+                if let Some(seed) = cfg.execution.seed {
+                    payload["seed"] = serde_json::json!(seed);
+                }
+            }
+            if use_stream {
+                payload["stream_options"] = serde_json::json!({ "include_usage": true });
+            }
+            payload
+        }
+    };
+    apply_extra_params(&mut body, &cfg.execution.extra_params);
+    body
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_single_target_inner(
     client: reqwest::Client,
@@ -783,32 +962,8 @@ async fn run_single_target_inner(
         }
     }
 
-    let mut messages = Vec::new();
-    let mut est_prompt_tokens = 0u64;
-    if let Some(ref sys) = sys_prompt {
-        let already_has_sys = history_messages
-            .map(|h| h.first().map(|m| m.role == "system").unwrap_or(false))
-            .unwrap_or(false);
-        if !already_has_sys {
-            est_prompt_tokens += estimate_tokens(sys);
-            messages.push(serde_json::json!({ "role": "system", "content": sys }));
-        }
-    }
-    if let Some(hist) = history_messages {
-        let last_user_pos = hist.iter().rposition(|m| m.role == "user");
-        for (idx, m) in hist.iter().enumerate() {
-            let content = if Some(idx) == last_user_pos && !effective_prompt.is_empty() {
-                effective_prompt.as_str()
-            } else {
-                m.content.as_str()
-            };
-            est_prompt_tokens += estimate_tokens(content);
-            messages.push(serde_json::json!({ "role": m.role, "content": content }));
-        }
-    } else {
-        est_prompt_tokens += estimate_tokens(&effective_prompt);
-        messages.push(serde_json::json!({ "role": "user", "content": effective_prompt }));
-    }
+    let (messages, est_prompt_tokens) =
+        build_chat_messages(sys_prompt.as_deref(), &effective_prompt, history_messages);
 
     let mut headers = HeaderMap::new();
     if let Some(key) = provider.resolve_api_key() {
@@ -930,83 +1085,16 @@ async fn run_single_target_inner(
         client.post(&url).headers(headers.clone()).body(multipart_bytes)
     } else {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let mut body = match endpoint_type {
-            EndpointType::AudioSpeech => {
-                let mut payload = serde_json::json!({
-                    "model": target.model,
-                    "input": effective_prompt,
-                });
-                if act.tts_voice {
-                    let voice = if cfg.execution.tts_voice.trim().is_empty() {
-                        "alloy"
-                    } else {
-                        cfg.execution.tts_voice.trim()
-                    };
-                    payload["voice"] = serde_json::json!(voice);
-                }
-                payload
-            }
-            EndpointType::Embeddings => serde_json::json!({
-                "model": target.model,
-                "input": effective_prompt,
-            }),
-            EndpointType::Responses => {
-                let mut payload = serde_json::json!({
-                    "model": target.model,
-                    "input": effective_prompt,
-                    "stream": false,
-                });
-                if !disallow_sampling && act.temperature {
-                    payload["temperature"] = serde_json::json!(cfg.execution.temperature);
-                }
-                if let Some(ref sys) = sys_prompt {
-                    payload["instructions"] = serde_json::json!(sys);
-                }
-                if act.max_tokens && cfg.execution.max_tokens > 0 {
-                    payload["max_output_tokens"] = serde_json::json!(cfg.execution.max_tokens);
-                }
-                payload
-            }
-            EndpointType::Custom => {
-                let mut payload = serde_json::json!({
-                    "model": target.model,
-                    "input": effective_prompt,
-                    "messages": messages,
-                });
-                if !disallow_sampling && act.temperature {
-                    payload["temperature"] = serde_json::json!(cfg.execution.temperature);
-                }
-                payload
-            }
-            _ => {
-                let mut payload = serde_json::json!({
-                    "model": target.model,
-                    "messages": messages,
-                    "stream": use_stream,
-                });
-                if !disallow_sampling {
-                    if act.temperature {
-                        payload["temperature"] = serde_json::json!(cfg.execution.temperature);
-                    }
-                    if act.top_p {
-                        payload["top_p"] = serde_json::json!(cfg.execution.top_p);
-                    }
-                }
-                if act.max_tokens && cfg.execution.max_tokens > 0 {
-                    payload["max_tokens"] = serde_json::json!(cfg.execution.max_tokens);
-                }
-                if act.seed {
-                    if let Some(seed) = cfg.execution.seed {
-                        payload["seed"] = serde_json::json!(seed);
-                    }
-                }
-                if use_stream {
-                    payload["stream_options"] = serde_json::json!({ "include_usage": true });
-                }
-                payload
-            }
-        };
-        apply_extra_params(&mut body, &cfg.execution.extra_params);
+        let body = build_endpoint_payload(
+            cfg,
+            target,
+            sys_prompt.as_deref(),
+            &effective_prompt,
+            &messages,
+            chat_mode || history_messages.is_some(),
+            use_stream,
+            disallow_sampling,
+        );
         json_body_opt = Some(body);
         client
             .post(&url)
@@ -1310,6 +1398,29 @@ async fn run_single_target_inner(
                         result.output = chat_text.to_string();
                     } else if let Some(resp_text) = val.get("output_text").and_then(|s| s.as_str()) {
                         result.output = resp_text.to_string();
+                    } else if let Some(resp_items) = val.get("output").and_then(|o| o.as_array()) {
+                        let mut parts = Vec::new();
+                        for item in resp_items {
+                            if let Some(content_arr) = item.get("content").and_then(|c| c.as_array()) {
+                                for c_item in content_arr {
+                                    if let Some(t) = c_item.get("text").and_then(|s| s.as_str()) {
+                                        if !t.is_empty() {
+                                            parts.push(t.to_string());
+                                        }
+                                    }
+                                }
+                            } else if let Some(t) = item.get("text").and_then(|s| s.as_str()) {
+                                if !t.is_empty() {
+                                    parts.push(t.to_string());
+                                }
+                            }
+                        }
+                        if parts.is_empty() {
+                            result.output =
+                                serde_json::to_string_pretty(&val).unwrap_or(raw_text);
+                        } else {
+                            result.output = parts.join("\n");
+                        }
                     } else if let Some(tr_text) = val.get("text").and_then(|s| s.as_str()) {
                         result.output = tr_text.to_string();
                     } else if let Some(emb) = val
@@ -1334,10 +1445,18 @@ async fn run_single_target_inner(
                     }
 
                     if let Some(u) = val.get("usage") {
-                        if let Some(pt) = u.get("prompt_tokens").and_then(|n| n.as_u64()) {
+                        if let Some(pt) = u
+                            .get("prompt_tokens")
+                            .or_else(|| u.get("input_tokens"))
+                            .and_then(|n| n.as_u64())
+                        {
                             result.prompt_tokens = pt;
                         }
-                        if let Some(ct) = u.get("completion_tokens").and_then(|n| n.as_u64()) {
+                        if let Some(ct) = u
+                            .get("completion_tokens")
+                            .or_else(|| u.get("output_tokens"))
+                            .and_then(|n| n.as_u64())
+                        {
                             result.completion_tokens = ct;
                         } else {
                             result.completion_tokens = estimate_tokens(&result.output);
@@ -1424,5 +1543,72 @@ mod tests {
         assert_eq!(payload["presence_penalty"], serde_json::json!(0.25));
         assert_eq!(payload["stop"], serde_json::json!(["END"]));
         assert!(payload.get("disabled_flag").is_none());
+    }
+
+    #[test]
+    fn builds_full_multi_turn_history_for_chat_and_responses_endpoints() {
+        let mut cfg = BenchConfig::default();
+        let target = cfg.targets[0].clone();
+        let history = vec![
+            ChatTurnMessage {
+                role: "user".to_string(),
+                content: "First question".to_string(),
+            },
+            ChatTurnMessage {
+                role: "assistant".to_string(),
+                content: "First answer".to_string(),
+            },
+            ChatTurnMessage {
+                role: "assistant".to_string(),
+                content: "ERROR: transient failure".to_string(),
+            },
+            ChatTurnMessage {
+                role: "user".to_string(),
+                content: "Follow up question".to_string(),
+            },
+        ];
+
+        let (messages, _) = build_chat_messages(
+            Some("Be concise"),
+            "Follow up question",
+            Some(&history),
+        );
+        // System + user1 + assistant1 + user2 (error turn skipped)
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1], serde_json::json!({"role": "user", "content": "First question"}));
+        assert_eq!(messages[2], serde_json::json!({"role": "assistant", "content": "First answer"}));
+        assert_eq!(messages[3], serde_json::json!({"role": "user", "content": "Follow up question"}));
+
+        cfg.execution.endpoint_type = EndpointType::ChatCompletions;
+        let chat_payload = build_endpoint_payload(
+            &cfg,
+            &target,
+            Some("Be concise"),
+            "Follow up question",
+            &messages,
+            true,
+            false,
+            false,
+        );
+        assert_eq!(chat_payload["messages"].as_array().unwrap().len(), 4);
+
+        cfg.execution.endpoint_type = EndpointType::Responses;
+        let resp_payload = build_endpoint_payload(
+            &cfg,
+            &target,
+            Some("Be concise"),
+            "Follow up question",
+            &messages,
+            true,
+            false,
+            false,
+        );
+        assert_eq!(resp_payload["instructions"], "Be concise");
+        let input_arr = resp_payload["input"].as_array().expect("responses input history array");
+        assert_eq!(input_arr.len(), 3);
+        assert_eq!(input_arr[0], serde_json::json!({"role": "user", "content": "First question"}));
+        assert_eq!(input_arr[1], serde_json::json!({"role": "assistant", "content": "First answer"}));
+        assert_eq!(input_arr[2], serde_json::json!({"role": "user", "content": "Follow up question"}));
     }
 }

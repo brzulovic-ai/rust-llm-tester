@@ -188,13 +188,13 @@ impl ChatParamField {
 
     pub fn hint(self) -> &'static str {
         match self {
-            ChatParamField::TargetModel => "Enter/←/→ cycles target model for sending Chat turns",
-            ChatParamField::ProviderName => "Enter/←/→ switches provider & its first model target",
+            ChatParamField::TargetModel => "Enter/→ next · Shift+Enter/← prev target model for sending Chat turns",
+            ChatParamField::ProviderName => "Enter/→ next · Shift+Enter/← prev provider & its first model target",
             ChatParamField::BaseUrl => "Enter/e to edit provider Base URL (e.g. https://api.openai.com/v1)",
             ChatParamField::ApiKeyEnv => "Enter/e to edit environment variable name holding API key",
             ChatParamField::ApiKeyInline => "Enter/e to edit inline API key (masked in list)",
             ChatParamField::CustomHeaders => "Enter/e to edit 'Key: Value; Key2: Value2' custom headers",
-            ChatParamField::EndpointType => "Enter/←/→ cycles /v1/chat/completions, /v1/responses, audio, embeddings, custom",
+            ChatParamField::EndpointType => "Enter/→ next · Shift+Enter/← prev endpoint (/v1/chat/completions, /v1/responses, audio, embeddings, custom)",
             ChatParamField::CustomEndpoint => "Enter/e to edit custom endpoint path or full URL",
             ChatParamField::Stream => "Enter/Space/←/→ toggles SSE streaming",
             ChatParamField::TimeoutSec => "←/→ (+/-10s) or Enter/e to type timeout (5..600 sec)",
@@ -204,7 +204,7 @@ impl ChatParamField {
             ChatParamField::Seed => "←/→ or Enter/e to type seed integer (empty = none)",
             ChatParamField::TtsVoice => "Enter/e to edit TTS voice (e.g. alloy, nova, echo)",
             ChatParamField::SystemPromptEnabled => "Enter/Space/←/→ toggles System Prompt Layer",
-            ChatParamField::SystemPersona => "Enter/←/→ cycles built-in System Persona (or none)",
+            ChatParamField::SystemPersona => "Enter/→ next · Shift+Enter/← prev System Persona (or none)",
             ChatParamField::SystemPromptContent => "Enter/e to edit custom System Prompt text",
             ChatParamField::TargetSystemOverride => "Enter/e to edit per-target system_prompt_override (empty clears)",
             ChatParamField::EndpointFilesCount => "Enter/Space toggles attached [[endpoint_files]] active state",
@@ -1353,6 +1353,11 @@ impl AppState {
                 self.status_message = "Chat composer active (Enter to send, Shift+Enter newline, Esc exit)".to_string();
             }
             KeyCode::Char('c') if self.active_tab == ActiveTab::Chat => {
+                if self.chat_running {
+                    self.abort_run();
+                    self.chat_running = false;
+                }
+                self.chat_active_assistant_idx = None;
                 self.chat_messages.clear();
                 if !self.prompt.trim().is_empty() {
                     self.chat_messages.push(ChatTurnMessage {
@@ -1453,6 +1458,13 @@ impl AppState {
                     && self.config_focus == ConfigFocus::Subgroups =>
             {
                 self.solo_selected_subgroup();
+            }
+            KeyCode::Enter
+                if self.active_tab == ActiveTab::Chat
+                    && self.chat_focus == ChatFocus::Params
+                    && key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                self.step_chat_param(-1);
             }
             KeyCode::Enter if self.active_tab == ActiveTab::Chat => {
                 match self.chat_focus {
@@ -2648,17 +2660,22 @@ impl AppState {
         self.status_message = format!("Opened 7:Chat from Waterfall ({})", model_label);
     }
 
-    pub fn send_chat_turn(&mut self) {
-        if self.chat_running || self.is_running {
-            return;
-        }
-        let Some(target) = self.active_chat_target().cloned() else {
-            self.status_message = "No target model configured for 7:Chat.".to_string();
-            return;
-        };
-
+    pub fn prepare_chat_send_history(&mut self) -> Option<Vec<ChatTurnMessage>> {
         let draft = self.chat_input.trim().to_string();
         if !draft.is_empty() {
+            while self
+                .chat_messages
+                .last()
+                .map(|m| {
+                    m.role.eq_ignore_ascii_case("assistant")
+                        && (m.content.trim().is_empty()
+                            || m.content.trim() == "..."
+                            || m.content.trim_start().starts_with("ERROR:"))
+                })
+                .unwrap_or(false)
+            {
+                self.chat_messages.pop();
+            }
             self.chat_messages.push(ChatTurnMessage {
                 role: "user".to_string(),
                 content: draft,
@@ -2669,34 +2686,49 @@ impl AppState {
                 role: "user".to_string(),
                 content: self.prompt.clone(),
             });
-        } else if self
-            .chat_messages
-            .last()
-            .map(|m| m.role == "assistant")
-            .unwrap_or(false)
-        {
-            if let Some(last) = self.chat_messages.last() {
-                if last.content.starts_with("ERROR:") {
-                    self.chat_messages.pop();
-                } else {
-                    self.status_message =
-                        "Press 'i' to type a follow-up message before sending.".to_string();
-                    return;
-                }
+        } else {
+            while self
+                .chat_messages
+                .last()
+                .map(|m| m.role.eq_ignore_ascii_case("assistant"))
+                .unwrap_or(false)
+            {
+                self.chat_messages.pop();
+            }
+            if self.chat_messages.is_empty() && !self.prompt.trim().is_empty() {
+                self.chat_messages.push(ChatTurnMessage {
+                    role: "user".to_string(),
+                    content: self.prompt.clone(),
+                });
             }
         }
 
         if self.chat_messages.is_empty() && self.config.matching_endpoint_files().is_empty() {
             self.status_message = "Enter a message or attach an endpoint file before sending.".to_string();
-            return;
+            return None;
         }
 
+        let send_history = self.chat_messages.clone();
         self.chat_messages.push(ChatTurnMessage {
             role: "assistant".to_string(),
             content: "...".to_string(),
         });
         self.chat_active_assistant_idx = Some(self.chat_messages.len() - 1);
-        let send_history = self.chat_messages[..self.chat_messages.len() - 1].to_vec();
+        Some(send_history)
+    }
+
+    pub fn send_chat_turn(&mut self) {
+        if self.chat_running || self.is_running {
+            return;
+        }
+        let Some(target) = self.active_chat_target().cloned() else {
+            self.status_message = "No target model configured for 7:Chat.".to_string();
+            return;
+        };
+
+        let Some(send_history) = self.prepare_chat_send_history() else {
+            return;
+        };
 
         let (abort_tx, abort_rx) = watch::channel(false);
         self.abort_tx = Some(abort_tx);
@@ -3542,6 +3574,58 @@ mod tests {
         assert!(!app.config.execution.extra_params[0].enabled);
         app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
         assert!(app.config.execution.extra_params.is_empty());
+    }
+
+    #[test]
+    fn shift_enter_decreases_target_model_selection_and_history_is_preserved() {
+        let mut app = test_app();
+        assert!(app.config.targets.len() >= 2);
+        app.active_tab = ActiveTab::Chat;
+        app.chat_focus = ChatFocus::Params;
+        app.chat_selected_param_idx = 0; // TargetModel
+        app.chat_target_id = app.config.targets[0].id.clone();
+
+        // Enter increases selection forward (0 -> 1)
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.chat_target_id, app.config.targets[1].id);
+
+        // Shift+Enter decreases selection backward (1 -> 0 -> last)
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert_eq!(app.chat_target_id, app.config.targets[0].id);
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert_eq!(
+            app.chat_target_id,
+            app.config.targets.last().unwrap().id
+        );
+
+        // Multi-turn follow-up keeps full history in send payload
+        app.chat_messages = vec![
+            ChatTurnMessage {
+                role: "user".to_string(),
+                content: "Turn 1 user".to_string(),
+            },
+            ChatTurnMessage {
+                role: "assistant".to_string(),
+                content: "Turn 1 assistant".to_string(),
+            },
+        ];
+        app.chat_input = "Turn 2 user".to_string();
+        let history_turn2 = app.prepare_chat_send_history().expect("turn 2 history");
+        assert_eq!(history_turn2.len(), 3);
+        assert_eq!(history_turn2[0].content, "Turn 1 user");
+        assert_eq!(history_turn2[1].content, "Turn 1 assistant");
+        assert_eq!(history_turn2[2].content, "Turn 2 user");
+
+        // Pressing resend ('r' with empty input) preserves earlier history up to last user turn
+        if let Some(last) = app.chat_messages.last_mut() {
+            last.content = "Turn 2 assistant".to_string();
+        }
+        let resend_history = app.prepare_chat_send_history().expect("resend history");
+        assert_eq!(resend_history.len(), 3);
+        assert_eq!(resend_history[0].content, "Turn 1 user");
+        assert_eq!(resend_history[1].content, "Turn 1 assistant");
+        assert_eq!(resend_history[2].content, "Turn 2 user");
     }
 }
 

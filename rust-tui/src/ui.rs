@@ -170,7 +170,7 @@ fn draw_footer(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect
             "COMPOSER: Type message · Shift+Enter Newline · Shift+↑/↓ Scroll · Enter Send · Esc Exit"
         }
         ActiveTab::Chat if app.chat_focus == ChatFocus::Params => {
-            "7:CHAT PARAMS: Space/[x] Activate · a/+ +Add Param · Del Remove · ←/→ Step · Enter/e Edit · i Type · r Send"
+            "7:CHAT PARAMS: Space/[x] Activate · a/+ Add · Enter Next/Edit · Shift+Enter/←/→ Step · i Type · r Send"
         }
         ActiveTab::Chat => {
             "7:CHAT TRANSCRIPT: ↑/↓/Shift+↑/↓/Wheel Scroll · Shift+Tab Focus · i Type · r Send · c Reset · x Abort"
