@@ -7,6 +7,8 @@ export interface ChatTurnMessage {
   role: 'user' | 'assistant';
   content: string;
   timestamp: number;
+  modelName?: string;
+  providerName?: string;
 }
 
 export type ProviderKind =

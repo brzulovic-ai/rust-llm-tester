@@ -130,6 +130,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setHeadersDraft(activeProvider ? formatCustomHeaders(activeProvider.customHeaders) : '');
   }, [activeProvider?.id]);
 
+  const prevMsgCountRef = useRef(messages.length);
+  useEffect(() => {
+    if (messages.length > prevMsgCountRef.current) {
+      const el = transcriptScrollRef.current;
+      if (el) {
+        el.scrollTop = el.scrollHeight;
+      }
+    }
+    prevMsgCountRef.current = messages.length;
+  }, [messages.length]);
+
   // Keyboard scrolling helpers for config panel & transcript canvas (PageUp/Down & Shift+Up/Down)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -1361,7 +1372,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
                           : 'var(--status-success)',
                       }}
                     >
-                      {isUser ? '[USER]' : `[ASSISTANT · ${activeTarget?.modelName ?? 'model'}]`}
+                      {isUser
+                        ? '[USER]'
+                        : msg.modelName?.trim()
+                        ? `[ASSISTANT · ${msg.modelName}]`
+                        : '[ASSISTANT]'}
                     </span>
                     {isRunning && idx === messages.length - 1 && !isUser && (
                       <span style={{ color: 'var(--status-warning)' }}>Streaming...</span>

@@ -21,11 +21,17 @@ import {
   parseSseLines,
 } from './metrics';
 
+export interface HistoryMessageInput {
+  role: 'user' | 'assistant';
+  content: string;
+  modelName?: string;
+}
+
 export interface RunTargetParams {
   target: TargetModel;
   provider: ProviderEndpoint;
   prompt: string;
-  historyMessages?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  historyMessages?: HistoryMessageInput[];
   systemPrompt: SystemPromptConfig;
   executionConfig: ExecutionConfig;
   endpointFiles?: EndpointFileAttachment[];
@@ -142,6 +148,86 @@ export function stripUnsupportedParamsFor400(
   return changed;
 }
 
+export function buildConversationMessages(options: {
+  appliedSystemPrompt?: string;
+  prompt: string;
+  fileSections?: string;
+  historyMessages?: HistoryMessageInput[];
+  currentTargetModel?: string;
+}): {
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+  effectivePrompt: string;
+} {
+  const {
+    appliedSystemPrompt,
+    prompt,
+    fileSections = '',
+    historyMessages,
+    currentTargetModel,
+  } = options;
+
+  const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [];
+  if (appliedSystemPrompt) {
+    messages.push({ role: 'system', content: appliedSystemPrompt });
+  }
+
+  let effectivePrompt = prompt;
+  if (historyMessages && historyMessages.length > 0) {
+    const filtered = historyMessages.filter((m) => {
+      const trimmed = m.content.trim();
+      if (
+        m.role === 'assistant' &&
+        (trimmed.length === 0 || trimmed === '...' || trimmed.startsWith('ERROR:'))
+      ) {
+        return false;
+      }
+      return trimmed.length > 0;
+    });
+
+    const distinctModels = new Set<string>();
+    for (const m of filtered) {
+      if (m.role === 'assistant' && m.modelName?.trim()) {
+        distinctModels.add(m.modelName.trim());
+      }
+    }
+    const targetClean = currentTargetModel?.trim();
+    const isMultiModelHistory =
+      distinctModels.size > 1 ||
+      (Boolean(targetClean) && Array.from(distinctModels).some((m) => m !== targetClean));
+
+    const lastUserRevIdx = [...filtered].reverse().findIndex((m) => m.role === 'user');
+    const lastUserIdx = lastUserRevIdx !== -1 ? filtered.length - 1 - lastUserRevIdx : -1;
+
+    filtered.forEach((m, idx) => {
+      let content = m.content;
+      if (idx === lastUserIdx) {
+        effectivePrompt = fileSections ? `${content}\n\n${fileSections}`.trim() : content;
+        content = effectivePrompt;
+      } else if (
+        m.role === 'assistant' &&
+        isMultiModelHistory &&
+        m.modelName?.trim() &&
+        !content.trimStart().startsWith('[Model:')
+      ) {
+        content = `[Model: ${m.modelName.trim()}]\n${content}`;
+      }
+      messages.push({ role: m.role, content });
+    });
+
+    if (lastUserIdx === -1 && (prompt.trim() || fileSections)) {
+      effectivePrompt = fileSections ? `${prompt}\n\n${fileSections}`.trim() : prompt;
+      messages.push({ role: 'user', content: effectivePrompt });
+    }
+  } else {
+    if (fileSections) {
+      effectivePrompt = `${prompt}\n\n${fileSections}`.trim();
+    }
+    messages.push({ role: 'user', content: effectivePrompt });
+  }
+
+  return { messages, effectivePrompt };
+}
+
 export async function executeSingleTarget(params: RunTargetParams): Promise<ModelRunResult> {
   const {
     target,
@@ -201,34 +287,13 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
       : '';
 
   const appliedSystemPrompt = resolveSystemPromptForTarget(target, systemPrompt);
-  const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [];
-  if (appliedSystemPrompt) {
-    messages.push({ role: 'system', content: appliedSystemPrompt });
-  }
-
-  let effectivePrompt = prompt;
-  if (historyMessages && historyMessages.length > 0) {
-    const cleaned = historyMessages.map((m) => ({
-      role: m.role,
-      content: m.content,
-    }));
-    const lastUserIdx = [...cleaned].reverse().findIndex((m) => m.role === 'user');
-    if (lastUserIdx !== -1) {
-      const targetIdx = cleaned.length - 1 - lastUserIdx;
-      effectivePrompt = fileSections
-        ? `${cleaned[targetIdx].content}\n\n${fileSections}`.trim()
-        : cleaned[targetIdx].content;
-      cleaned[targetIdx] = { ...cleaned[targetIdx], content: effectivePrompt };
-    } else if (fileSections) {
-      effectivePrompt = `${prompt}\n\n${fileSections}`.trim();
-    }
-    messages.push(...cleaned);
-  } else {
-    if (fileSections) {
-      effectivePrompt = `${prompt}\n\n${fileSections}`.trim();
-    }
-    messages.push({ role: 'user', content: effectivePrompt });
-  }
+  const { messages, effectivePrompt } = buildConversationMessages({
+    appliedSystemPrompt,
+    prompt,
+    fileSections,
+    historyMessages,
+    currentTargetModel: target.modelName,
+  });
 
   const startedAt = performance.now();
   let timing = computeTimingMetrics(
@@ -428,9 +493,12 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
           ...resolvedExtraParams,
         };
       } else if (endpointType === 'responses') {
+        const nonSystemItems = messages.filter((m) => m.role !== 'system');
+        const responsesInput =
+          historyMessages && nonSystemItems.length > 0 ? nonSystemItems : effectivePrompt;
         jsonBody = {
           model: target.modelName,
-          input: effectivePrompt,
+          input: responsesInput,
           ...(appliedSystemPrompt ? { instructions: appliedSystemPrompt } : {}),
           ...(!disallowSampling && useTemperature
             ? { temperature: executionConfig.temperature }
@@ -737,6 +805,21 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
         text = data.choices[0].message.content ?? '';
       } else if (typeof data.output_text === 'string') {
         text = data.output_text;
+      } else if (Array.isArray((data as { output?: unknown }).output)) {
+        const rawItems = (data as {
+          output: Array<{ text?: string; content?: Array<{ text?: string }> }>;
+        }).output;
+        const parts: string[] = [];
+        for (const item of rawItems) {
+          if (Array.isArray(item.content)) {
+            for (const c of item.content) {
+              if (typeof c.text === 'string' && c.text) parts.push(c.text);
+            }
+          } else if (typeof item.text === 'string' && item.text) {
+            parts.push(item.text);
+          }
+        }
+        text = parts.length > 0 ? parts.join('\n') : JSON.stringify(data, null, 2);
       } else if (typeof data.text === 'string') {
         text = data.text;
       } else if (Array.isArray(data.data) && Array.isArray(data.data[0]?.embedding)) {
@@ -747,9 +830,20 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
         text = JSON.stringify(data, null, 2);
       }
 
-      const promptTokens = data.usage?.prompt_tokens ?? currentResult.promptTokens;
-      const completionTokens = data.usage?.completion_tokens ?? estimateTokenCount(text);
-      const totalTokens = data.usage?.total_tokens ?? promptTokens + completionTokens;
+      const usageExt = data.usage as
+        | {
+            prompt_tokens?: number;
+            completion_tokens?: number;
+            total_tokens?: number;
+            input_tokens?: number;
+            output_tokens?: number;
+          }
+        | undefined;
+      const promptTokens =
+        usageExt?.prompt_tokens ?? usageExt?.input_tokens ?? currentResult.promptTokens;
+      const completionTokens =
+        usageExt?.completion_tokens ?? usageExt?.output_tokens ?? estimateTokenCount(text);
+      const totalTokens = usageExt?.total_tokens ?? promptTokens + completionTokens;
 
       timing = computeTimingMetrics(
         { ...timing, firstTokenAt: headersAt, completedAt },

@@ -425,6 +425,7 @@ impl AppState {
             chat_messages: vec![ChatTurnMessage {
                 role: "user".to_string(),
                 content: initial_prompt,
+                model_name: None,
             }],
             chat_scroll: 0,
             chat_running: false,
@@ -901,11 +902,15 @@ impl AppState {
                 if let Some(idx) = self.chat_active_assistant_idx {
                     if let Some(msg) = self.chat_messages.get_mut(idx) {
                         msg.content = text;
+                        if !res.model_name.trim().is_empty() {
+                            msg.model_name = Some(res.model_name.clone());
+                        }
                     }
                 } else {
                     self.chat_messages.push(ChatTurnMessage {
                         role: "assistant".to_string(),
                         content: text,
+                        model_name: Some(res.model_name.clone()),
                     });
                     self.chat_active_assistant_idx = Some(self.chat_messages.len() - 1);
                 }
@@ -1363,6 +1368,7 @@ impl AppState {
                     self.chat_messages.push(ChatTurnMessage {
                         role: "user".to_string(),
                         content: self.prompt.clone(),
+                        model_name: None,
                     });
                 }
                 self.chat_last_result = None;
@@ -2574,6 +2580,7 @@ impl AppState {
             self.chat_messages.push(ChatTurnMessage {
                 role: "user".to_string(),
                 content: self.prompt.clone(),
+                model_name: None,
             });
         }
         if let Some(res) = chosen.or(self.chat_last_result.as_ref()) {
@@ -2596,6 +2603,7 @@ impl AppState {
                 self.chat_messages.push(ChatTurnMessage {
                     role: "assistant".to_string(),
                     content: assistant_text,
+                    model_name: Some(res.model_name.clone()),
                 });
             }
         }
@@ -2660,7 +2668,10 @@ impl AppState {
         self.status_message = format!("Opened 7:Chat from Waterfall ({})", model_label);
     }
 
-    pub fn prepare_chat_send_history(&mut self) -> Option<Vec<ChatTurnMessage>> {
+    pub fn prepare_chat_send_history(
+        &mut self,
+        target_model: Option<&str>,
+    ) -> Option<Vec<ChatTurnMessage>> {
         let draft = self.chat_input.trim().to_string();
         if !draft.is_empty() {
             while self
@@ -2679,12 +2690,14 @@ impl AppState {
             self.chat_messages.push(ChatTurnMessage {
                 role: "user".to_string(),
                 content: draft,
+                model_name: None,
             });
             self.chat_input.clear();
         } else if self.chat_messages.is_empty() && !self.prompt.trim().is_empty() {
             self.chat_messages.push(ChatTurnMessage {
                 role: "user".to_string(),
                 content: self.prompt.clone(),
+                model_name: None,
             });
         } else {
             while self
@@ -2699,6 +2712,7 @@ impl AppState {
                 self.chat_messages.push(ChatTurnMessage {
                     role: "user".to_string(),
                     content: self.prompt.clone(),
+                    model_name: None,
                 });
             }
         }
@@ -2712,6 +2726,10 @@ impl AppState {
         self.chat_messages.push(ChatTurnMessage {
             role: "assistant".to_string(),
             content: "...".to_string(),
+            model_name: target_model
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
         });
         self.chat_active_assistant_idx = Some(self.chat_messages.len() - 1);
         Some(send_history)
@@ -2726,7 +2744,7 @@ impl AppState {
             return;
         };
 
-        let Some(send_history) = self.prepare_chat_send_history() else {
+        let Some(send_history) = self.prepare_chat_send_history(Some(target.model.as_str())) else {
             return;
         };
 
@@ -3599,32 +3617,52 @@ mod tests {
             app.config.targets.last().unwrap().id
         );
 
-        // Multi-turn follow-up keeps full history in send payload
+        // Multi-turn follow-up across models preserves per-message model_name and full history
+        let first_model = app.config.targets[0].model.clone();
+        let second_model = app.config.targets[1].model.clone();
         app.chat_messages = vec![
             ChatTurnMessage {
                 role: "user".to_string(),
                 content: "Turn 1 user".to_string(),
+                model_name: None,
             },
             ChatTurnMessage {
                 role: "assistant".to_string(),
                 content: "Turn 1 assistant".to_string(),
+                model_name: Some(first_model.clone()),
             },
         ];
         app.chat_input = "Turn 2 user".to_string();
-        let history_turn2 = app.prepare_chat_send_history().expect("turn 2 history");
+        let history_turn2 = app
+            .prepare_chat_send_history(Some(&second_model))
+            .expect("turn 2 history");
         assert_eq!(history_turn2.len(), 3);
         assert_eq!(history_turn2[0].content, "Turn 1 user");
         assert_eq!(history_turn2[1].content, "Turn 1 assistant");
+        assert_eq!(
+            history_turn2[1].model_name.as_deref(),
+            Some(first_model.as_str())
+        );
         assert_eq!(history_turn2[2].content, "Turn 2 user");
+        assert_eq!(
+            app.chat_messages.last().and_then(|m| m.model_name.as_deref()),
+            Some(second_model.as_str())
+        );
 
         // Pressing resend ('r' with empty input) preserves earlier history up to last user turn
         if let Some(last) = app.chat_messages.last_mut() {
             last.content = "Turn 2 assistant".to_string();
         }
-        let resend_history = app.prepare_chat_send_history().expect("resend history");
+        let resend_history = app
+            .prepare_chat_send_history(Some(&second_model))
+            .expect("resend history");
         assert_eq!(resend_history.len(), 3);
         assert_eq!(resend_history[0].content, "Turn 1 user");
         assert_eq!(resend_history[1].content, "Turn 1 assistant");
+        assert_eq!(
+            resend_history[1].model_name.as_deref(),
+            Some(first_model.as_str())
+        );
         assert_eq!(resend_history[2].content, "Turn 2 user");
     }
 }

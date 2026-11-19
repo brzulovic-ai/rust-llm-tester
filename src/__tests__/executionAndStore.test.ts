@@ -1,6 +1,11 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { PROMPT_SUITES, SYSTEM_PERSONAS } from '../data/promptSuites';
-import { resolveSystemPromptForTarget, runExecutionPool } from '../utils/executionEngine';
+import {
+  buildConversationMessages,
+  executeSingleTarget,
+  resolveSystemPromptForTarget,
+  runExecutionPool,
+} from '../utils/executionEngine';
 import {
   clearHistory,
   deleteRunFromHistory,
@@ -273,5 +278,107 @@ describe('Execution Engine, Suites & History Store', () => {
 
     clearHistory(storage);
     expect(loadHistory(storage)).toEqual([]);
+  });
+
+  it('preserves multi-model history and resends all valid turns to subsequent models', async () => {
+    const history = [
+      { role: 'user' as const, content: 'First prompt' },
+      { role: 'assistant' as const, content: 'First reply', modelName: 'gpt-4o' },
+      { role: 'assistant' as const, content: 'ERROR: temporary fail', modelName: 'gpt-4o' },
+      { role: 'user' as const, content: 'Second prompt' },
+    ];
+
+    const sameModel = buildConversationMessages({
+      appliedSystemPrompt: 'Be helpful',
+      prompt: 'Second prompt',
+      historyMessages: history,
+      currentTargetModel: 'gpt-4o',
+    });
+    expect(sameModel.messages).toEqual([
+      { role: 'system', content: 'Be helpful' },
+      { role: 'user', content: 'First prompt' },
+      { role: 'assistant', content: 'First reply' },
+      { role: 'user', content: 'Second prompt' },
+    ]);
+
+    const crossModel = buildConversationMessages({
+      appliedSystemPrompt: 'Be helpful',
+      prompt: 'Second prompt',
+      historyMessages: history,
+      currentTargetModel: 'claude-3-5-sonnet',
+    });
+    expect(crossModel.messages).toEqual([
+      { role: 'system', content: 'Be helpful' },
+      { role: 'user', content: 'First prompt' },
+      { role: 'assistant', content: '[Model: gpt-4o]\nFirst reply' },
+      { role: 'user', content: 'Second prompt' },
+    ]);
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({
+        output: [{ content: [{ text: 'Follow-up answer' }] }],
+        usage: { input_tokens: 30, output_tokens: 10, total_tokens: 40 },
+      }),
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    const target: TargetModel = {
+      id: 't-claude',
+      providerId: 'p1',
+      providerName: 'OpenAI-Compatible',
+      providerKind: 'openai',
+      modelName: 'claude-3-5-sonnet',
+      enabled: true,
+    };
+    const provider: ProviderEndpoint = {
+      id: 'p1',
+      name: 'OpenAI-Compatible',
+      kind: 'openai',
+      baseUrl: 'https://api.example.com/v1',
+      apiKey: 'secret',
+      customHeaders: {},
+      directBrowser: true,
+      models: ['gpt-4o', 'claude-3-5-sonnet'],
+    };
+
+    const res = await executeSingleTarget({
+      target,
+      provider,
+      prompt: 'Second prompt',
+      historyMessages: history,
+      systemPrompt: {
+        enabled: true,
+        content: 'Be helpful',
+        personaId: null,
+        targetMode: 'all',
+        targetModelIds: [],
+      },
+      executionConfig: {
+        mode: 'sequential',
+        concurrency: 1,
+        timeoutSec: 30,
+        stream: false,
+        temperature: 0.7,
+        maxTokens: 256,
+        topP: 1,
+        endpointType: 'responses',
+      },
+      enqueuedAt: performance.now(),
+      signal: new AbortController().signal,
+      onUpdate: () => {},
+    });
+
+    expect(res.status).toBe('completed');
+    expect(res.output).toBe('Follow-up answer');
+    const sentBody = JSON.parse(mockFetch.mock.calls[0][1].body as string);
+    expect(sentBody.instructions).toBe('Be helpful');
+    expect(sentBody.input).toEqual([
+      { role: 'user', content: 'First prompt' },
+      { role: 'assistant', content: '[Model: gpt-4o]\nFirst reply' },
+      { role: 'user', content: 'Second prompt' },
+    ]);
   });
 });

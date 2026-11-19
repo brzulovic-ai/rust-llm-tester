@@ -339,6 +339,8 @@ export default function App() {
             role: 'assistant',
             content: assistantContent,
             timestamp: now + 1,
+            modelName: chosen.modelName,
+            providerName: chosen.providerName,
           });
         }
       }
@@ -525,6 +527,15 @@ export default function App() {
     const now = Date.now();
 
     if (draft) {
+      while (
+        baseHistory.length > 0 &&
+        baseHistory[baseHistory.length - 1]?.role === 'assistant' &&
+        (baseHistory[baseHistory.length - 1].content.trim() === '' ||
+          baseHistory[baseHistory.length - 1].content.trim() === '...' ||
+          baseHistory[baseHistory.length - 1].content.trimStart().startsWith('ERROR:'))
+      ) {
+        baseHistory.pop();
+      }
       baseHistory.push({
         id: `chat-u-${now}`,
         role: 'user',
@@ -549,6 +560,7 @@ export default function App() {
     const historyForRequest = baseHistory.map((m) => ({
       role: m.role,
       content: m.content,
+      modelName: m.modelName,
     }));
     const lastUserContent =
       [...historyForRequest].reverse().find((m) => m.role === 'user')?.content ?? prompt;
@@ -560,6 +572,8 @@ export default function App() {
         role: 'assistant',
         content: '...',
         timestamp: Date.now(),
+        modelName: activeTarget.modelName,
+        providerName: provider.name,
       },
     ]);
     setChatRunning(true);
@@ -580,7 +594,16 @@ export default function App() {
           : `ERROR: ${partial.error}`
         : '...';
       setChatMessages((prev) =>
-        prev.map((m) => (m.id === assistantId ? { ...m, content: nextText } : m))
+        prev.map((m) =>
+          m.id === assistantId
+            ? {
+                ...m,
+                content: nextText,
+                modelName: partial.modelName || m.modelName,
+                providerName: partial.providerName || m.providerName,
+              }
+            : m
+        )
       );
     };
 

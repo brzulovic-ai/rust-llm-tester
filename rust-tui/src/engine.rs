@@ -174,6 +174,8 @@ impl ModelRunResult {
 pub struct ChatTurnMessage {
     pub role: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -725,6 +727,7 @@ pub fn build_chat_messages(
     sys_prompt: Option<&str>,
     effective_prompt: &str,
     history_messages: Option<&[ChatTurnMessage]>,
+    current_target_model: Option<&str>,
 ) -> (Vec<serde_json::Value>, u64) {
     let mut messages = Vec::new();
     let mut est_prompt_tokens = 0u64;
@@ -757,19 +760,51 @@ pub fn build_chat_messages(
             }
         }
 
+        // Detect multi-model conversation history (more than one assistant model or a prior turn from a different model)
+        let mut distinct_assistant_models: Vec<&str> = Vec::new();
+        for m in &filtered {
+            if m.role.trim().eq_ignore_ascii_case("assistant") {
+                if let Some(name) = m.model_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    if !distinct_assistant_models.contains(&name) {
+                        distinct_assistant_models.push(name);
+                    }
+                }
+            }
+        }
+        let target_clean = current_target_model.map(str::trim).filter(|s| !s.is_empty());
+        let is_multi_model_history = distinct_assistant_models.len() > 1
+            || target_clean
+                .map(|cur| distinct_assistant_models.iter().any(|m| *m != cur))
+                .unwrap_or(false);
+
         let last_user_pos = filtered
             .iter()
             .rposition(|m| m.role.trim().eq_ignore_ascii_case("user"));
         for (idx, m) in filtered.iter().enumerate() {
             let role = m.role.trim().to_ascii_lowercase();
-            let content = if Some(idx) == last_user_pos && !effective_prompt.is_empty() {
+            let raw_content = if Some(idx) == last_user_pos && !effective_prompt.is_empty() {
                 effective_prompt
             } else {
                 m.content.as_str()
             };
-            if content.trim().is_empty() {
+            if raw_content.trim().is_empty() {
                 continue;
             }
+            let owned_content: String;
+            let content: &str = if role == "assistant" && is_multi_model_history {
+                if let Some(mname) = m.model_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    if raw_content.trim_start().starts_with("[Model:") {
+                        raw_content
+                    } else {
+                        owned_content = format!("[Model: {}]\n{}", mname, raw_content);
+                        &owned_content
+                    }
+                } else {
+                    raw_content
+                }
+            } else {
+                raw_content
+            };
             est_prompt_tokens += estimate_tokens(content);
             messages.push(serde_json::json!({ "role": role, "content": content }));
         }
@@ -962,8 +997,12 @@ async fn run_single_target_inner(
         }
     }
 
-    let (messages, est_prompt_tokens) =
-        build_chat_messages(sys_prompt.as_deref(), &effective_prompt, history_messages);
+    let (messages, est_prompt_tokens) = build_chat_messages(
+        sys_prompt.as_deref(),
+        &effective_prompt,
+        history_messages,
+        Some(target.model.as_str()),
+    );
 
     let mut headers = HeaderMap::new();
     if let Some(key) = provider.resolve_api_key() {
@@ -1553,25 +1592,31 @@ mod tests {
             ChatTurnMessage {
                 role: "user".to_string(),
                 content: "First question".to_string(),
+                model_name: None,
             },
             ChatTurnMessage {
                 role: "assistant".to_string(),
                 content: "First answer".to_string(),
+                model_name: Some("gpt-4o".to_string()),
             },
             ChatTurnMessage {
                 role: "assistant".to_string(),
                 content: "ERROR: transient failure".to_string(),
+                model_name: Some("gpt-4o".to_string()),
             },
             ChatTurnMessage {
                 role: "user".to_string(),
                 content: "Follow up question".to_string(),
+                model_name: None,
             },
         ];
 
+        // Same model preserves clean content without prefix
         let (messages, _) = build_chat_messages(
             Some("Be concise"),
             "Follow up question",
             Some(&history),
+            Some("gpt-4o"),
         );
         // System + user1 + assistant1 + user2 (error turn skipped)
         assert_eq!(messages.len(), 4);
@@ -1579,6 +1624,19 @@ mod tests {
         assert_eq!(messages[1], serde_json::json!({"role": "user", "content": "First question"}));
         assert_eq!(messages[2], serde_json::json!({"role": "assistant", "content": "First answer"}));
         assert_eq!(messages[3], serde_json::json!({"role": "user", "content": "Follow up question"}));
+
+        // Switching to a different model preserves full history and attributes prior model replies
+        let (multi_model_messages, _) = build_chat_messages(
+            Some("Be concise"),
+            "Follow up question",
+            Some(&history),
+            Some("claude-3-5-sonnet"),
+        );
+        assert_eq!(multi_model_messages.len(), 4);
+        assert_eq!(
+            multi_model_messages[2],
+            serde_json::json!({"role": "assistant", "content": "[Model: gpt-4o]\nFirst answer"})
+        );
 
         cfg.execution.endpoint_type = EndpointType::ChatCompletions;
         let chat_payload = build_endpoint_payload(

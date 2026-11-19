@@ -1331,7 +1331,15 @@ fn draw_chat_tab(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette, area
             let role_header = if is_user {
                 "[USER]".to_string()
             } else if is_assistant {
-                format!("[ASSISTANT · {}]", model_label)
+                match msg
+                    .model_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    Some(m) => format!("[ASSISTANT · {}]", m),
+                    None => "[ASSISTANT]".to_string(),
+                }
             } else {
                 format!("[{}]", msg.role.to_uppercase())
             };

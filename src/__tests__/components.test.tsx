@@ -2,10 +2,11 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import App from '../App';
 import { CapabilityGraphView } from '../components/CapabilityGraphView';
+import { ChatView } from '../components/ChatView';
 import { DiffCompareView } from '../components/DiffCompareView';
 import { ResultCard } from '../components/ResultCard';
 import { WaterfallView } from '../components/WaterfallView';
-import type { ModelRunResult } from '../types/benchmark';
+import type { ChatTurnMessage, ModelRunResult } from '../types/benchmark';
 import { createInitialTiming } from '../utils/metrics';
 
 const mockResults: ModelRunResult[] = [
@@ -156,5 +157,105 @@ describe('Workbench UI Components', () => {
     expect(screen.getByText('100%')).toBeInTheDocument();
     fireEvent.click(screen.getByTitle('Zoom in'));
     expect(screen.getByText('125%')).toBeInTheDocument();
+  });
+
+  it('renders ChatView history canvas with fixed per-message model names when active target switches', () => {
+    const messages: ChatTurnMessage[] = [
+      { id: 'u1', role: 'user', content: 'First question', timestamp: 1 },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'First answer',
+        timestamp: 2,
+        modelName: 'gemini-4-hydrogen',
+      },
+      { id: 'u2', role: 'user', content: 'Second question', timestamp: 3 },
+      {
+        id: 'a2',
+        role: 'assistant',
+        content: 'Second answer',
+        timestamp: 4,
+        modelName: 'llama3.2:latest',
+      },
+    ];
+
+    render(
+      <ChatView
+        targets={[
+          {
+            id: 't1',
+            providerId: 'p1',
+            providerName: 'Gemini Server Engine',
+            providerKind: 'gemini-builtin',
+            modelName: 'gemini-4-hydrogen',
+            enabled: true,
+          },
+          {
+            id: 't2',
+            providerId: 'p2',
+            providerName: 'Ollama Local',
+            providerKind: 'ollama',
+            modelName: 'llama3.2:latest',
+            enabled: true,
+          },
+          {
+            id: 't3',
+            providerId: 'p1',
+            providerName: 'OpenAI',
+            providerKind: 'openai',
+            modelName: 'gpt-4o',
+            enabled: true,
+          },
+        ]}
+        onTargetsChange={() => {}}
+        providers={[
+          {
+            id: 'p1',
+            name: 'Gemini Server Engine',
+            kind: 'gemini-builtin',
+            baseUrl: 'https://api.example.com/v1',
+            apiKey: '',
+            customHeaders: {},
+            directBrowser: false,
+            models: ['gemini-4-hydrogen', 'gpt-4o'],
+          },
+        ]}
+        onProvidersChange={() => {}}
+        executionConfig={{
+          mode: 'parallel',
+          concurrency: 2,
+          timeoutSec: 300,
+          stream: true,
+          temperature: 0.7,
+          maxTokens: 1024,
+          topP: 1,
+        }}
+        onExecutionConfigChange={() => {}}
+        systemPrompt={{
+          enabled: false,
+          content: '',
+          personaId: null,
+          targetMode: 'all',
+          targetModelIds: [],
+        }}
+        onSystemPromptChange={() => {}}
+        endpointFiles={[]}
+        onEndpointFilesChange={() => {}}
+        activeTargetId="t3"
+        onActiveTargetIdChange={() => {}}
+        messages={messages}
+        chatInput=""
+        onChatInputChange={() => {}}
+        isRunning={false}
+        lastResult={null}
+        onSendTurn={() => {}}
+        onAbort={() => {}}
+        onResetChat={() => {}}
+      />
+    );
+
+    expect(screen.getByText('[ASSISTANT · gemini-4-hydrogen]')).toBeInTheDocument();
+    expect(screen.getByText('[ASSISTANT · llama3.2:latest]')).toBeInTheDocument();
+    expect(screen.queryByText('[ASSISTANT · gpt-4o]')).not.toBeInTheDocument();
   });
 });
