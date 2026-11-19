@@ -374,7 +374,8 @@ impl AppState {
         let first_suite = &PROMPT_SUITES[0];
         let default_chat_target = config
             .enabled_targets()
-            .first()
+            .into_iter()
+            .next()
             .or_else(|| config.targets.first())
             .map(|t| t.id.clone())
             .unwrap_or_default();
