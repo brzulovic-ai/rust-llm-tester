@@ -29,6 +29,7 @@ interface ProxyChatBody {
   seed?: number;
   stream?: boolean;
   timeoutMs?: number;
+  extraParams?: Record<string, unknown>;
 }
 
 interface ProxyModelsBody {
@@ -251,6 +252,13 @@ async function startServer() {
     if (typeof body.maxTokens === 'number' && body.maxTokens > 0) payload.max_tokens = body.maxTokens;
     if (!disallowSampling && typeof body.topP === 'number') payload.top_p = body.topP;
     if (typeof body.seed === 'number') payload.seed = body.seed;
+    if (body.extraParams && typeof body.extraParams === 'object' && !Array.isArray(body.extraParams)) {
+      for (const [k, v] of Object.entries(body.extraParams)) {
+        if (k.trim()) {
+          payload[k.trim()] = v;
+        }
+      }
+    }
     if (payload.stream) {
       payload.stream_options = { include_usage: true };
     }

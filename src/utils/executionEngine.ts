@@ -25,6 +25,7 @@ export interface RunTargetParams {
   target: TargetModel;
   provider: ProviderEndpoint;
   prompt: string;
+  historyMessages?: Array<{ role: 'user' | 'assistant'; content: string }>;
   systemPrompt: SystemPromptConfig;
   executionConfig: ExecutionConfig;
   endpointFiles?: EndpointFileAttachment[];
@@ -66,6 +67,28 @@ export function modelDisallowsSamplingParams(modelName: string): boolean {
     clean.startsWith('gpt-5.') ||
     clean === 'deepseek-reasoner'
   );
+}
+
+export function parseCustomParamValue(raw: string): unknown {
+  const trimmed = raw.trim();
+  if (trimmed === 'true') return true;
+  if (trimmed === 'false') return false;
+  if (trimmed === 'null') return null;
+  if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+    const n = Number(trimmed);
+    if (Number.isFinite(n)) return n;
+  }
+  if (
+    (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+    (trimmed.startsWith('[') && trimmed.endsWith(']'))
+  ) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return raw;
+    }
+  }
+  return raw;
 }
 
 export function stripUnsupportedParamsFor400(
@@ -124,6 +147,7 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
     target,
     provider,
     prompt,
+    historyMessages,
     systemPrompt,
     executionConfig,
     endpointFiles = [],
@@ -133,34 +157,78 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
   } = params;
 
   const endpointType = executionConfig.endpointType ?? 'chat-completions';
-  const matchedFiles = filesForEndpoint(endpointFiles, endpointType);
+  const act = executionConfig.activeParams ?? {};
+  const useCustomHeaders = act.customHeaders !== false;
+  const useCustomEndpoint = act.customEndpoint !== false;
+  const useStream = act.stream !== false && executionConfig.stream;
+  const useTemperature = act.temperature !== false;
+  const useTopP = act.topP !== false;
+  const useMaxTokens = act.maxTokens !== false;
+  const useSeed = act.seed !== false;
+  const useTtsVoice = act.ttsVoice !== false;
+  const useFiles = act.endpointFiles !== false;
+
+  const effectiveCustomHeaders = useCustomHeaders ? provider.customHeaders : {};
+  const resolvedExtraParams: Record<string, unknown> = {};
+  for (const param of executionConfig.extraParams ?? []) {
+    if (param.enabled && param.key.trim()) {
+      resolvedExtraParams[param.key.trim()] = parseCustomParamValue(param.value);
+    }
+  }
+
+  const matchedFiles = useFiles ? filesForEndpoint(endpointFiles, endpointType) : [];
   const resolvedUrl =
     provider.kind === 'gemini-builtin' && endpointType === 'chat-completions'
       ? '/api/gemini/chat'
-      : resolveEndpointUrl(provider.baseUrl, endpointType, executionConfig.customEndpoint);
+      : resolveEndpointUrl(
+          provider.baseUrl,
+          endpointType,
+          useCustomEndpoint ? executionConfig.customEndpoint : undefined
+        );
 
-  // Build prompt enriched with any text file attachments for chat/text endpoints
-  let effectivePrompt = prompt;
-  if (
-    (endpointType === 'chat-completions' || endpointType === 'responses' || endpointType === 'embeddings') &&
+  const fileSections =
+    (endpointType === 'chat-completions' ||
+      endpointType === 'responses' ||
+      endpointType === 'embeddings') &&
     matchedFiles.length > 0
-  ) {
-    const fileSections = matchedFiles
-      .map((f) =>
-        f.textPreview
-          ? `--- Attached File: ${f.name} (${f.mimeType}, ${formatBytes(f.sizeBytes)}) ---\n${f.textPreview}`
-          : `[Attached binary file: ${f.name} (${f.mimeType}, ${formatBytes(f.sizeBytes)})]`
-      )
-      .join('\n\n');
-    effectivePrompt = `${prompt}\n\n${fileSections}`.trim();
-  }
+      ? matchedFiles
+          .map((f) =>
+            f.textPreview
+              ? `--- Attached File: ${f.name} (${f.mimeType}, ${formatBytes(f.sizeBytes)}) ---\n${f.textPreview}`
+              : `[Attached binary file: ${f.name} (${f.mimeType}, ${formatBytes(f.sizeBytes)})]`
+          )
+          .join('\n\n')
+      : '';
 
   const appliedSystemPrompt = resolveSystemPromptForTarget(target, systemPrompt);
-  const messages: Array<{ role: 'system' | 'user'; content: string }> = [];
+  const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [];
   if (appliedSystemPrompt) {
     messages.push({ role: 'system', content: appliedSystemPrompt });
   }
-  messages.push({ role: 'user', content: effectivePrompt });
+
+  let effectivePrompt = prompt;
+  if (historyMessages && historyMessages.length > 0) {
+    const cleaned = historyMessages.map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+    const lastUserIdx = [...cleaned].reverse().findIndex((m) => m.role === 'user');
+    if (lastUserIdx !== -1) {
+      const targetIdx = cleaned.length - 1 - lastUserIdx;
+      effectivePrompt = fileSections
+        ? `${cleaned[targetIdx].content}\n\n${fileSections}`.trim()
+        : cleaned[targetIdx].content;
+      cleaned[targetIdx] = { ...cleaned[targetIdx], content: effectivePrompt };
+    } else if (fileSections) {
+      effectivePrompt = `${prompt}\n\n${fileSections}`.trim();
+    }
+    messages.push(...cleaned);
+  } else {
+    if (fileSections) {
+      effectivePrompt = `${prompt}\n\n${fileSections}`.trim();
+    }
+    messages.push({ role: 'user', content: effectivePrompt });
+  }
 
   const startedAt = performance.now();
   let timing = computeTimingMetrics(
@@ -238,16 +306,19 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
         mutableJsonPayload = {
           model: target.modelName,
           messages,
-          stream: executionConfig.stream,
+          stream: useStream,
           timeoutMs,
-          seed: executionConfig.seed,
+          ...(useSeed && typeof executionConfig.seed === 'number'
+            ? { seed: executionConfig.seed }
+            : {}),
+          ...resolvedExtraParams,
         };
         fetchBodyPayload = JSON.stringify(mutableJsonPayload);
       } else if (provider.directBrowser) {
         fetchTargetUrl = resolvedUrl;
         fetchHeaders = {
           'Content-Type': 'application/json',
-          ...provider.customHeaders,
+          ...effectiveCustomHeaders,
         };
         if (provider.apiKey && !fetchHeaders['Authorization'] && !fetchHeaders['authorization']) {
           fetchHeaders['Authorization'] = `Bearer ${provider.apiKey}`;
@@ -255,11 +326,19 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
         mutableJsonPayload = {
           model: target.modelName,
           messages,
-          stream: executionConfig.stream,
-          ...(!disallowSampling ? { temperature: executionConfig.temperature, top_p: executionConfig.topP } : {}),
-          ...(executionConfig.maxTokens > 0 ? { max_tokens: executionConfig.maxTokens } : {}),
-          ...(typeof executionConfig.seed === 'number' ? { seed: executionConfig.seed } : {}),
-          ...(executionConfig.stream ? { stream_options: { include_usage: true } } : {}),
+          stream: useStream,
+          ...(!disallowSampling && useTemperature
+            ? { temperature: executionConfig.temperature }
+            : {}),
+          ...(!disallowSampling && useTopP ? { top_p: executionConfig.topP } : {}),
+          ...(useMaxTokens && executionConfig.maxTokens > 0
+            ? { max_tokens: executionConfig.maxTokens }
+            : {}),
+          ...(useSeed && typeof executionConfig.seed === 'number'
+            ? { seed: executionConfig.seed }
+            : {}),
+          ...(useStream ? { stream_options: { include_usage: true } } : {}),
+          ...resolvedExtraParams,
         };
         fetchBodyPayload = JSON.stringify(mutableJsonPayload);
       } else {
@@ -267,15 +346,21 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
         mutableJsonPayload = {
           baseUrl: provider.baseUrl,
           apiKey: provider.apiKey,
-          headers: provider.customHeaders,
+          headers: effectiveCustomHeaders,
           model: target.modelName,
           messages,
-          stream: executionConfig.stream,
-          ...(!disallowSampling
-            ? { temperature: executionConfig.temperature, topP: executionConfig.topP }
+          stream: useStream,
+          ...(!disallowSampling && useTemperature
+            ? { temperature: executionConfig.temperature }
             : {}),
-          maxTokens: executionConfig.maxTokens,
-          seed: executionConfig.seed,
+          ...(!disallowSampling && useTopP ? { topP: executionConfig.topP } : {}),
+          ...(useMaxTokens ? { maxTokens: executionConfig.maxTokens } : {}),
+          ...(useSeed && typeof executionConfig.seed === 'number'
+            ? { seed: executionConfig.seed }
+            : {}),
+          ...(Object.keys(resolvedExtraParams).length > 0
+            ? { extraParams: resolvedExtraParams }
+            : {}),
           timeoutMs,
         };
         fetchBodyPayload = JSON.stringify(mutableJsonPayload);
@@ -287,7 +372,7 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
       }
       if (provider.directBrowser) {
         fetchTargetUrl = resolvedUrl;
-        fetchHeaders = { ...provider.customHeaders };
+        fetchHeaders = { ...effectiveCustomHeaders };
         delete fetchHeaders['Content-Type'];
         delete fetchHeaders['content-type'];
         if (provider.apiKey && !fetchHeaders['Authorization'] && !fetchHeaders['authorization']) {
@@ -313,7 +398,7 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
         fetchBodyPayload = JSON.stringify({
           endpointUrl: resolvedUrl,
           apiKey: provider.apiKey,
-          headers: provider.customHeaders,
+          headers: effectiveCustomHeaders,
           multipart: true,
           fields,
           files: matchedFiles.map((f) => ({
@@ -332,30 +417,42 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
         jsonBody = {
           model: target.modelName,
           input: effectivePrompt,
-          voice: executionConfig.ttsVoice || 'alloy',
+          ...(useTtsVoice ? { voice: executionConfig.ttsVoice || 'alloy' } : {}),
           response_format: 'mp3',
+          ...resolvedExtraParams,
         };
       } else if (endpointType === 'embeddings') {
         jsonBody = {
           model: target.modelName,
           input: effectivePrompt,
+          ...resolvedExtraParams,
         };
       } else if (endpointType === 'responses') {
         jsonBody = {
           model: target.modelName,
           input: effectivePrompt,
           ...(appliedSystemPrompt ? { instructions: appliedSystemPrompt } : {}),
-          ...(!disallowSampling ? { temperature: executionConfig.temperature } : {}),
-          ...(executionConfig.maxTokens > 0 ? { max_output_tokens: executionConfig.maxTokens } : {}),
-          stream: executionConfig.stream,
+          ...(!disallowSampling && useTemperature
+            ? { temperature: executionConfig.temperature }
+            : {}),
+          ...(useMaxTokens && executionConfig.maxTokens > 0
+            ? { max_output_tokens: executionConfig.maxTokens }
+            : {}),
+          stream: useStream,
+          ...resolvedExtraParams,
         };
       } else {
         jsonBody = {
           model: target.modelName,
           input: effectivePrompt,
           messages,
-          ...(!disallowSampling ? { temperature: executionConfig.temperature } : {}),
-          ...(executionConfig.maxTokens > 0 ? { max_tokens: executionConfig.maxTokens } : {}),
+          ...(!disallowSampling && useTemperature
+            ? { temperature: executionConfig.temperature }
+            : {}),
+          ...(!disallowSampling && useTopP ? { top_p: executionConfig.topP } : {}),
+          ...(useMaxTokens && executionConfig.maxTokens > 0
+            ? { max_tokens: executionConfig.maxTokens }
+            : {}),
           ...(matchedFiles.length > 0
             ? {
                 files: matchedFiles.map((f) => ({
@@ -366,6 +463,7 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
                 })),
               }
             : {}),
+          ...resolvedExtraParams,
         };
       }
 
@@ -373,7 +471,7 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
         fetchTargetUrl = resolvedUrl;
         fetchHeaders = {
           'Content-Type': 'application/json',
-          ...provider.customHeaders,
+          ...effectiveCustomHeaders,
         };
         if (provider.apiKey && !fetchHeaders['Authorization'] && !fetchHeaders['authorization']) {
           fetchHeaders['Authorization'] = `Bearer ${provider.apiKey}`;
@@ -385,7 +483,7 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
         mutableJsonPayload = {
           endpointUrl: resolvedUrl,
           apiKey: provider.apiKey,
-          headers: provider.customHeaders,
+          headers: effectiveCustomHeaders,
           multipart: false,
           jsonBody,
           timeoutMs,
@@ -404,9 +502,22 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
     let headersAt = performance.now();
     timing = computeTimingMetrics({ ...timing, headersAt }, headersAt);
 
+    const readErrorBody = async (resp: Response): Promise<string> => {
+      if (typeof resp.text === 'function') {
+        return resp.text().catch(() => '');
+      }
+      if (typeof resp.json === 'function') {
+        return resp
+          .json()
+          .then((d) => JSON.stringify(d))
+          .catch(() => '');
+      }
+      return '';
+    };
+
     let preReadErrBody: string | null = null;
     if (!response.ok && response.status === 400 && mutableJsonPayload) {
-      preReadErrBody = await response.text().catch(() => '');
+      preReadErrBody = await readErrorBody(response);
       if (stripUnsupportedParamsFor400(mutableJsonPayload, preReadErrBody)) {
         response = await fetch(fetchTargetUrl, {
           method: 'POST',
@@ -423,7 +534,7 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
     if (!response.ok) {
       let errMessage = `HTTP ${response.status} ${response.statusText}`;
       let advice: string | undefined;
-      const errText = preReadErrBody ?? (await response.text().catch(() => ''));
+      const errText = preReadErrBody ?? (await readErrorBody(response));
       if (errText) {
         try {
           const errJson = JSON.parse(errText) as {
@@ -472,7 +583,7 @@ export async function executeSingleTarget(params: RunTargetParams): Promise<Mode
     }
 
     const contentType = response.headers.get('content-type') ?? '';
-    if (executionConfig.stream && contentType.includes('text/event-stream') && response.body) {
+    if (useStream && contentType.includes('text/event-stream') && response.body) {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let sseBuffer = '';

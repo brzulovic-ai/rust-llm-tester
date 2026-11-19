@@ -1,5 +1,6 @@
 use crate::config::{
-    BenchConfig, EndpointType, ExecutionMode, ProviderConfig, SystemTargetMode, TargetConfig,
+    BenchConfig, CustomSendParam, EndpointType, ExecutionMode, ProviderConfig, SystemTargetMode,
+    TargetConfig,
 };
 use crate::suites::lookup_persona;
 use futures::StreamExt;
@@ -169,10 +170,18 @@ impl ModelRunResult {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatTurnMessage {
+    pub role: String,
+    pub content: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
     Update(ModelRunResult),
     BatchFinished,
+    ChatUpdate(ModelRunResult),
+    ChatFinished,
     ModelsRefreshed {
         provider_id: String,
         provider_name: String,
@@ -524,6 +533,62 @@ pub fn spawn_benchmark_batch(
     });
 }
 
+pub fn spawn_chat_turn(
+    cfg: BenchConfig,
+    target: TargetConfig,
+    history_messages: Vec<ChatTurnMessage>,
+    tx: mpsc::UnboundedSender<EngineEvent>,
+    abort_rx: watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(20))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        let batch_start = Instant::now();
+        let prompt = history_messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+
+        if let Some(provider) = cfg.find_provider(&target.provider_id).cloned() {
+            let mut target_abort = abort_rx;
+            run_single_target_inner(
+                client,
+                batch_start,
+                &cfg,
+                &target,
+                &provider,
+                &prompt,
+                Some(&history_messages),
+                true,
+                &tx,
+                &mut target_abort,
+            )
+            .await;
+        } else {
+            let _ = tx.send(EngineEvent::ChatUpdate(ModelRunResult {
+                target_id: target.id,
+                model_name: target.model,
+                provider_name: target.provider_id,
+                status: RunStatus::Error,
+                output: String::new(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                tokens_per_sec: 0.0,
+                timing: TimingBreakdown::default(),
+                http_status: None,
+                error: Some("Provider not found for selected chat target".to_string()),
+                advice: Some("Select a valid target/provider in 7:Chat Send Config or 6:Config.".to_string()),
+            }));
+        }
+        let _ = tx.send(EngineEvent::ChatFinished);
+    });
+}
+
 pub fn resolve_endpoint_url(
     base_url: &str,
     endpoint_type: EndpointType,
@@ -582,6 +647,54 @@ fn build_multipart_body(
     buf
 }
 
+pub fn parse_custom_param_value(raw: &str) -> serde_json::Value {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return serde_json::Value::String(String::new());
+    }
+    if trimmed == "true" {
+        return serde_json::Value::Bool(true);
+    }
+    if trimmed == "false" {
+        return serde_json::Value::Bool(false);
+    }
+    if trimmed == "null" {
+        return serde_json::Value::Null;
+    }
+    if (trimmed.starts_with('{') && trimmed.ends_with('}'))
+        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+    {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            return parsed;
+        }
+    }
+    if let Ok(int_val) = trimmed.parse::<i64>() {
+        return serde_json::json!(int_val);
+    }
+    if let Ok(float_val) = trimmed.parse::<f64>() {
+        if float_val.is_finite() {
+            return serde_json::json!(float_val);
+        }
+    }
+    serde_json::Value::String(raw.to_string())
+}
+
+pub fn apply_extra_params(payload: &mut serde_json::Value, extras: &[CustomSendParam]) {
+    let Some(obj) = payload.as_object_mut() else {
+        return;
+    };
+    for p in extras {
+        if !p.enabled {
+            continue;
+        }
+        let key = p.key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        obj.insert(key.to_string(), parse_custom_param_value(&p.value));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_single_target(
     client: reqwest::Client,
@@ -593,11 +706,54 @@ async fn run_single_target(
     tx: &mpsc::UnboundedSender<EngineEvent>,
     abort_rx: &mut watch::Receiver<bool>,
 ) {
+    run_single_target_inner(
+        client,
+        batch_start,
+        cfg,
+        target,
+        provider,
+        prompt,
+        None,
+        false,
+        tx,
+        abort_rx,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_single_target_inner(
+    client: reqwest::Client,
+    batch_start: Instant,
+    cfg: &BenchConfig,
+    target: &TargetConfig,
+    provider: &ProviderConfig,
+    prompt: &str,
+    history_messages: Option<&[ChatTurnMessage]>,
+    chat_mode: bool,
+    tx: &mpsc::UnboundedSender<EngineEvent>,
+    abort_rx: &mut watch::Receiver<bool>,
+) {
+    let emit = |res: ModelRunResult| {
+        let ev = if chat_mode {
+            EngineEvent::ChatUpdate(res)
+        } else {
+            EngineEvent::Update(res)
+        };
+        let _ = tx.send(ev);
+    };
+
     let dispatched_at = Instant::now();
     let queue_ms = dispatched_at.duration_since(batch_start).as_secs_f64() * 1000.0;
     let sys_prompt = resolve_system_prompt(target, cfg);
     let endpoint_type = cfg.execution.endpoint_type;
-    let matched_files = cfg.matching_endpoint_files();
+    let act = &cfg.execution.active_params;
+    let use_stream = cfg.execution.stream && act.stream;
+    let matched_files = if act.endpoint_files {
+        cfg.matching_endpoint_files()
+    } else {
+        Vec::new()
+    };
 
     // Inject text attachments into prompt for text endpoints when present
     let mut effective_prompt = prompt.to_string();
@@ -628,12 +784,31 @@ async fn run_single_target(
     }
 
     let mut messages = Vec::new();
-    let mut est_prompt_tokens = estimate_tokens(&effective_prompt);
+    let mut est_prompt_tokens = 0u64;
     if let Some(ref sys) = sys_prompt {
-        est_prompt_tokens += estimate_tokens(sys);
-        messages.push(serde_json::json!({ "role": "system", "content": sys }));
+        let already_has_sys = history_messages
+            .map(|h| h.first().map(|m| m.role == "system").unwrap_or(false))
+            .unwrap_or(false);
+        if !already_has_sys {
+            est_prompt_tokens += estimate_tokens(sys);
+            messages.push(serde_json::json!({ "role": "system", "content": sys }));
+        }
     }
-    messages.push(serde_json::json!({ "role": "user", "content": effective_prompt }));
+    if let Some(hist) = history_messages {
+        let last_user_pos = hist.iter().rposition(|m| m.role == "user");
+        for (idx, m) in hist.iter().enumerate() {
+            let content = if Some(idx) == last_user_pos && !effective_prompt.is_empty() {
+                effective_prompt.as_str()
+            } else {
+                m.content.as_str()
+            };
+            est_prompt_tokens += estimate_tokens(content);
+            messages.push(serde_json::json!({ "role": m.role, "content": content }));
+        }
+    } else {
+        est_prompt_tokens += estimate_tokens(&effective_prompt);
+        messages.push(serde_json::json!({ "role": "user", "content": effective_prompt }));
+    }
 
     let mut headers = HeaderMap::new();
     if let Some(key) = provider.resolve_api_key() {
@@ -641,12 +816,14 @@ async fn run_single_target(
             headers.insert(AUTHORIZATION, val);
         }
     }
-    for (k, v) in &provider.custom_headers {
-        if let (Ok(name), Ok(val)) = (
-            HeaderName::from_bytes(k.as_bytes()),
-            HeaderValue::from_str(v),
-        ) {
-            headers.insert(name, val);
+    if act.custom_headers {
+        for (k, v) in &provider.custom_headers {
+            if let (Ok(name), Ok(val)) = (
+                HeaderName::from_bytes(k.as_bytes()),
+                HeaderValue::from_str(v),
+            ) {
+                headers.insert(name, val);
+            }
         }
     }
 
@@ -669,9 +846,14 @@ async fn run_single_target(
         error: None,
         advice: None,
     };
-    let _ = tx.send(EngineEvent::Update(result.clone()));
+    emit(result.clone());
 
-    let url = resolve_endpoint_url(&provider.base_url, endpoint_type, &cfg.execution.custom_endpoint);
+    let custom_endpoint_val = if act.custom_endpoint {
+        cfg.execution.custom_endpoint.as_str()
+    } else {
+        ""
+    };
+    let url = resolve_endpoint_url(&provider.base_url, endpoint_type, custom_endpoint_val);
     let timeout_dur = Duration::from_secs(cfg.execution.timeout_sec.clamp(5, 600));
     let use_multipart = matches!(
         endpoint_type,
@@ -696,7 +878,7 @@ async fn run_single_target(
             result.advice = Some(
                 "Add [[endpoint_files]] pointing to a local audio file in benchforge.toml.".to_string(),
             );
-            let _ = tx.send(EngineEvent::Update(result));
+            emit(result);
             return;
         }
 
@@ -726,7 +908,7 @@ async fn run_single_target(
                     result.timing.total_ms = dispatched_at.elapsed().as_secs_f64() * 1000.0 + queue_ms;
                     result.error = Some(format!("Failed to read file '{}': {}", f.path, e));
                     result.advice = Some("Verify [[endpoint_files]].path exists on disk.".to_string());
-                    let _ = tx.send(EngineEvent::Update(result));
+                    emit(result);
                     return;
                 }
             }
@@ -748,18 +930,21 @@ async fn run_single_target(
         client.post(&url).headers(headers.clone()).body(multipart_bytes)
     } else {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let body = match endpoint_type {
+        let mut body = match endpoint_type {
             EndpointType::AudioSpeech => {
-                let voice = if cfg.execution.tts_voice.trim().is_empty() {
-                    "alloy"
-                } else {
-                    cfg.execution.tts_voice.trim()
-                };
-                serde_json::json!({
+                let mut payload = serde_json::json!({
                     "model": target.model,
                     "input": effective_prompt,
-                    "voice": voice,
-                })
+                });
+                if act.tts_voice {
+                    let voice = if cfg.execution.tts_voice.trim().is_empty() {
+                        "alloy"
+                    } else {
+                        cfg.execution.tts_voice.trim()
+                    };
+                    payload["voice"] = serde_json::json!(voice);
+                }
+                payload
             }
             EndpointType::Embeddings => serde_json::json!({
                 "model": target.model,
@@ -771,13 +956,13 @@ async fn run_single_target(
                     "input": effective_prompt,
                     "stream": false,
                 });
-                if !disallow_sampling {
+                if !disallow_sampling && act.temperature {
                     payload["temperature"] = serde_json::json!(cfg.execution.temperature);
                 }
                 if let Some(ref sys) = sys_prompt {
                     payload["instructions"] = serde_json::json!(sys);
                 }
-                if cfg.execution.max_tokens > 0 {
+                if act.max_tokens && cfg.execution.max_tokens > 0 {
                     payload["max_output_tokens"] = serde_json::json!(cfg.execution.max_tokens);
                 }
                 payload
@@ -788,7 +973,7 @@ async fn run_single_target(
                     "input": effective_prompt,
                     "messages": messages,
                 });
-                if !disallow_sampling {
+                if !disallow_sampling && act.temperature {
                     payload["temperature"] = serde_json::json!(cfg.execution.temperature);
                 }
                 payload
@@ -797,24 +982,31 @@ async fn run_single_target(
                 let mut payload = serde_json::json!({
                     "model": target.model,
                     "messages": messages,
-                    "stream": cfg.execution.stream,
+                    "stream": use_stream,
                 });
                 if !disallow_sampling {
-                    payload["temperature"] = serde_json::json!(cfg.execution.temperature);
-                    payload["top_p"] = serde_json::json!(cfg.execution.top_p);
+                    if act.temperature {
+                        payload["temperature"] = serde_json::json!(cfg.execution.temperature);
+                    }
+                    if act.top_p {
+                        payload["top_p"] = serde_json::json!(cfg.execution.top_p);
+                    }
                 }
-                if cfg.execution.max_tokens > 0 {
+                if act.max_tokens && cfg.execution.max_tokens > 0 {
                     payload["max_tokens"] = serde_json::json!(cfg.execution.max_tokens);
                 }
-                if let Some(seed) = cfg.execution.seed {
-                    payload["seed"] = serde_json::json!(seed);
+                if act.seed {
+                    if let Some(seed) = cfg.execution.seed {
+                        payload["seed"] = serde_json::json!(seed);
+                    }
                 }
-                if cfg.execution.stream {
+                if use_stream {
                     payload["stream_options"] = serde_json::json!({ "include_usage": true });
                 }
                 payload
             }
         };
+        apply_extra_params(&mut body, &cfg.execution.extra_params);
         json_body_opt = Some(body);
         client
             .post(&url)
@@ -831,7 +1023,7 @@ async fn run_single_target(
                     result.timing.total_ms = dispatched_at.elapsed().as_secs_f64() * 1000.0 + queue_ms;
                     result.error = Some(format!("Request timed out after {}s", cfg.execution.timeout_sec));
                     result.advice = Some(build_advice(Some(504), "timed out", &provider.base_url));
-                    let _ = tx.send(EngineEvent::Update(result));
+                    emit(result);
                     return;
                 }
             }
@@ -840,7 +1032,7 @@ async fn run_single_target(
             result.status = RunStatus::Aborted;
             result.timing.total_ms = dispatched_at.elapsed().as_secs_f64() * 1000.0 + queue_ms;
             result.error = Some("Aborted by user".to_string());
-            let _ = tx.send(EngineEvent::Update(result));
+            emit(result);
             return;
         }
     };
@@ -853,7 +1045,7 @@ async fn run_single_target(
             result.timing.total_ms = dispatched_at.elapsed().as_secs_f64() * 1000.0 + queue_ms;
             result.advice = Some(build_advice(None, &msg, &provider.base_url));
             result.error = Some(msg);
-            let _ = tx.send(EngineEvent::Update(result));
+            emit(result);
             return;
         }
     };
@@ -882,7 +1074,7 @@ async fn run_single_target(
                                     result.timing.total_ms = dispatched_at.elapsed().as_secs_f64() * 1000.0 + queue_ms;
                                     result.error = Some(format!("Request timed out after {}s", cfg.execution.timeout_sec));
                                     result.advice = Some(build_advice(Some(504), "timed out", &provider.base_url));
-                                    let _ = tx.send(EngineEvent::Update(result));
+                                    emit(result);
                                     return;
                                 }
                             }
@@ -891,7 +1083,7 @@ async fn run_single_target(
                             result.status = RunStatus::Aborted;
                             result.timing.total_ms = dispatched_at.elapsed().as_secs_f64() * 1000.0 + queue_ms;
                             result.error = Some("Aborted by user".to_string());
-                            let _ = tx.send(EngineEvent::Update(result));
+                            emit(result);
                             return;
                         }
                     };
@@ -915,7 +1107,7 @@ async fn run_single_target(
                                 dispatched_at.elapsed().as_secs_f64() * 1000.0 + queue_ms;
                             result.advice = Some(build_advice(None, &msg, &provider.base_url));
                             result.error = Some(msg);
-                            let _ = tx.send(EngineEvent::Update(result));
+                            emit(result);
                             return;
                         }
                     }
@@ -934,7 +1126,7 @@ async fn run_single_target(
                 &err_body.chars().take(240).collect::<String>()
             ));
             result.advice = Some(build_advice(Some(status_code), &err_body, &provider.base_url));
-            let _ = tx.send(EngineEvent::Update(result));
+            emit(result);
             return;
         }
     } else {
@@ -942,7 +1134,7 @@ async fn run_single_target(
     };
 
     let is_sse = endpoint_type == EndpointType::ChatCompletions
-        && cfg.execution.stream
+        && use_stream
         && response
             .headers()
             .get(CONTENT_TYPE)
@@ -961,7 +1153,7 @@ async fn run_single_target(
                 result.status = RunStatus::Aborted;
                 result.error = Some("Stream aborted by user".to_string());
                 result.timing.total_ms = dispatched_at.elapsed().as_secs_f64() * 1000.0 + queue_ms;
-                let _ = tx.send(EngineEvent::Update(result));
+                emit(result);
                 return;
             }
         } {
@@ -986,7 +1178,7 @@ async fn run_single_target(
                         result.status = RunStatus::Error;
                         result.error = Some(err_val.to_string());
                         result.timing.total_ms = dispatched_at.elapsed().as_secs_f64() * 1000.0 + queue_ms;
-                        let _ = tx.send(EngineEvent::Update(result));
+                        emit(result);
                         return;
                     }
                     if let Some(u) = parsed.usage {
@@ -1035,7 +1227,7 @@ async fn run_single_target(
                                             .round()
                                             / 10.0;
                                 }
-                                let _ = tx.send(EngineEvent::Update(result.clone()));
+                                emit(result.clone());
                             }
                         }
                     }
@@ -1059,7 +1251,7 @@ async fn run_single_target(
             result.tokens_per_sec =
                 ((result.completion_tokens as f64 / denom_ms) * 1000.0 * 10.0).round() / 10.0;
         }
-        let _ = tx.send(EngineEvent::Update(result));
+        emit(result);
     } else if endpoint_type == EndpointType::AudioSpeech {
         let resp_mime = response
             .headers()
@@ -1098,7 +1290,7 @@ async fn run_single_target(
                 result.error = Some(format!("Failed reading binary audio response: {}", e));
             }
         }
-        let _ = tx.send(EngineEvent::Update(result));
+        emit(result);
     } else {
         let raw_text_res = response.text().await;
         let end = Instant::now();
@@ -1174,7 +1366,7 @@ async fn run_single_target(
                 result.error = Some(format!("Failed reading endpoint response: {}", e));
             }
         }
-        let _ = tx.send(EngineEvent::Update(result));
+        emit(result);
     }
 }
 
@@ -1203,5 +1395,34 @@ mod tests {
         assert!(payload.get("temperature").is_none());
         assert!(payload.get("top_p").is_none());
         assert!(payload.get("max_tokens").is_some());
+    }
+
+    #[test]
+    fn applies_extra_params_and_parses_typed_json_values() {
+        let mut payload = serde_json::json!({
+            "model": "gpt-4o-mini",
+            "stream": false
+        });
+        let extras = vec![
+            CustomSendParam {
+                key: "presence_penalty".to_string(),
+                value: "0.25".to_string(),
+                enabled: true,
+            },
+            CustomSendParam {
+                key: "stop".to_string(),
+                value: "[\"END\"]".to_string(),
+                enabled: true,
+            },
+            CustomSendParam {
+                key: "disabled_flag".to_string(),
+                value: "true".to_string(),
+                enabled: false,
+            },
+        ];
+        apply_extra_params(&mut payload, &extras);
+        assert_eq!(payload["presence_penalty"], serde_json::json!(0.25));
+        assert_eq!(payload["stop"], serde_json::json!(["END"]));
+        assert!(payload.get("disabled_flag").is_none());
     }
 }

@@ -1,6 +1,7 @@
-use crate::config::{BenchConfig, ExecutionMode, TargetConfig, ThemeId};
+use crate::config::{BenchConfig, CustomSendParam, ExecutionMode, TargetConfig, ThemeId};
 use crate::engine::{
-    spawn_benchmark_batch, spawn_refresh_provider_models, EngineEvent, ModelRunResult, RunStatus,
+    spawn_benchmark_batch, spawn_chat_turn, spawn_refresh_provider_models, ChatTurnMessage,
+    EngineEvent, ModelRunResult, RunStatus,
 };
 use crate::export::{
     export_bundle, load_history, load_latest_export, push_run_supabase, save_run_to_history,
@@ -16,13 +17,14 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use tokio::sync::{mpsc, watch};
 
-pub const TAB_TITLES: [&str; 6] = [
+pub const TAB_TITLES: [&str; 7] = [
     "1:Prompt",
     "2:Responses",
     "3:Waterfall",
     "4:Diff",
     "5:XY Graph",
     "6:Config",
+    "7:Chat",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +35,7 @@ pub enum ActiveTab {
     DiffCompare,
     CapabilityGraph,
     ConfigEditor,
+    Chat,
 }
 
 impl ActiveTab {
@@ -44,6 +47,7 @@ impl ActiveTab {
             ActiveTab::DiffCompare => 3,
             ActiveTab::CapabilityGraph => 4,
             ActiveTab::ConfigEditor => 5,
+            ActiveTab::Chat => 6,
         }
     }
 
@@ -55,6 +59,7 @@ impl ActiveTab {
             3 => Some(ActiveTab::DiffCompare),
             4 => Some(ActiveTab::CapabilityGraph),
             5 => Some(ActiveTab::ConfigEditor),
+            6 => Some(ActiveTab::Chat),
             _ => None,
         }
     }
@@ -67,6 +72,146 @@ impl ActiveTab {
         let idx = self.index();
         let prev = if idx == 0 { TAB_TITLES.len() - 1 } else { idx - 1 };
         Self::from_index(prev).unwrap_or(ActiveTab::PromptSuites)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatFocus {
+    Params,
+    Messages,
+    Composer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatConfigRow {
+    Builtin(ChatParamField),
+    Custom(usize),
+    AddParam,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatParamField {
+    TargetModel,
+    ProviderName,
+    BaseUrl,
+    ApiKeyEnv,
+    ApiKeyInline,
+    CustomHeaders,
+    EndpointType,
+    CustomEndpoint,
+    Stream,
+    TimeoutSec,
+    Temperature,
+    TopP,
+    MaxTokens,
+    Seed,
+    TtsVoice,
+    SystemPromptEnabled,
+    SystemPersona,
+    SystemPromptContent,
+    TargetSystemOverride,
+    EndpointFilesCount,
+    ExecutionMode,
+    Concurrency,
+    RandomizeOrder,
+}
+
+pub const CHAT_PARAM_FIELDS: [ChatParamField; 23] = [
+    ChatParamField::TargetModel,
+    ChatParamField::ProviderName,
+    ChatParamField::BaseUrl,
+    ChatParamField::ApiKeyEnv,
+    ChatParamField::ApiKeyInline,
+    ChatParamField::CustomHeaders,
+    ChatParamField::EndpointType,
+    ChatParamField::CustomEndpoint,
+    ChatParamField::Stream,
+    ChatParamField::TimeoutSec,
+    ChatParamField::Temperature,
+    ChatParamField::TopP,
+    ChatParamField::MaxTokens,
+    ChatParamField::Seed,
+    ChatParamField::TtsVoice,
+    ChatParamField::SystemPromptEnabled,
+    ChatParamField::SystemPersona,
+    ChatParamField::SystemPromptContent,
+    ChatParamField::TargetSystemOverride,
+    ChatParamField::EndpointFilesCount,
+    ChatParamField::ExecutionMode,
+    ChatParamField::Concurrency,
+    ChatParamField::RandomizeOrder,
+];
+
+impl ChatParamField {
+    pub fn label(self) -> &'static str {
+        match self {
+            ChatParamField::TargetModel => "Target Model",
+            ChatParamField::ProviderName => "Provider",
+            ChatParamField::BaseUrl => "Base URL",
+            ChatParamField::ApiKeyEnv => "API Key Env",
+            ChatParamField::ApiKeyInline => "API Key (Inline)",
+            ChatParamField::CustomHeaders => "Custom Headers",
+            ChatParamField::EndpointType => "Endpoint Type",
+            ChatParamField::CustomEndpoint => "Custom Endpoint",
+            ChatParamField::Stream => "SSE Stream",
+            ChatParamField::TimeoutSec => "Timeout (sec)",
+            ChatParamField::Temperature => "Temperature",
+            ChatParamField::TopP => "Top P",
+            ChatParamField::MaxTokens => "Max Tokens",
+            ChatParamField::Seed => "Seed",
+            ChatParamField::TtsVoice => "TTS Voice",
+            ChatParamField::SystemPromptEnabled => "System Layer On",
+            ChatParamField::SystemPersona => "System Persona",
+            ChatParamField::SystemPromptContent => "System Prompt",
+            ChatParamField::TargetSystemOverride => "Target Sys Override",
+            ChatParamField::EndpointFilesCount => "Endpoint Files",
+            ChatParamField::ExecutionMode => "Exec Mode",
+            ChatParamField::Concurrency => "Threads",
+            ChatParamField::RandomizeOrder => "Random Order",
+        }
+    }
+
+    pub fn is_toggle_or_cycle(self) -> bool {
+        matches!(
+            self,
+            ChatParamField::TargetModel
+                | ChatParamField::ProviderName
+                | ChatParamField::EndpointType
+                | ChatParamField::Stream
+                | ChatParamField::SystemPromptEnabled
+                | ChatParamField::SystemPersona
+                | ChatParamField::EndpointFilesCount
+                | ChatParamField::ExecutionMode
+                | ChatParamField::RandomizeOrder
+        )
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            ChatParamField::TargetModel => "Enter/←/→ cycles target model for sending Chat turns",
+            ChatParamField::ProviderName => "Enter/←/→ switches provider & its first model target",
+            ChatParamField::BaseUrl => "Enter/e to edit provider Base URL (e.g. https://api.openai.com/v1)",
+            ChatParamField::ApiKeyEnv => "Enter/e to edit environment variable name holding API key",
+            ChatParamField::ApiKeyInline => "Enter/e to edit inline API key (masked in list)",
+            ChatParamField::CustomHeaders => "Enter/e to edit 'Key: Value; Key2: Value2' custom headers",
+            ChatParamField::EndpointType => "Enter/←/→ cycles /v1/chat/completions, /v1/responses, audio, embeddings, custom",
+            ChatParamField::CustomEndpoint => "Enter/e to edit custom endpoint path or full URL",
+            ChatParamField::Stream => "Enter/Space/←/→ toggles SSE streaming",
+            ChatParamField::TimeoutSec => "←/→ (+/-10s) or Enter/e to type timeout (5..600 sec)",
+            ChatParamField::Temperature => "←/→ (+/-0.05) or Enter/e to type temperature (0.0..2.0)",
+            ChatParamField::TopP => "←/→ (+/-0.05) or Enter/e to type top_p (0.0..1.0)",
+            ChatParamField::MaxTokens => "←/→ (+/-128) or Enter/e to type max_tokens (0 = omit)",
+            ChatParamField::Seed => "←/→ or Enter/e to type seed integer (empty = none)",
+            ChatParamField::TtsVoice => "Enter/e to edit TTS voice (e.g. alloy, nova, echo)",
+            ChatParamField::SystemPromptEnabled => "Enter/Space/←/→ toggles System Prompt Layer",
+            ChatParamField::SystemPersona => "Enter/←/→ cycles built-in System Persona (or none)",
+            ChatParamField::SystemPromptContent => "Enter/e to edit custom System Prompt text",
+            ChatParamField::TargetSystemOverride => "Enter/e to edit per-target system_prompt_override (empty clears)",
+            ChatParamField::EndpointFilesCount => "Enter/Space toggles attached [[endpoint_files]] active state",
+            ChatParamField::ExecutionMode => "Enter/Space/←/→ switches Parallel / Sequential",
+            ChatParamField::Concurrency => "←/→ (+/-1) or Enter/e to type worker threads (1..100)",
+            ChatParamField::RandomizeOrder => "Enter/Space/←/→ toggles random target execution order",
+        }
     }
 }
 
@@ -164,6 +309,10 @@ pub struct UiLayoutZones {
     pub config_models_offset: usize,
     pub config_subgroups_area: Rect,
     pub config_subgroups_offset: usize,
+    pub chat_params_area: Rect,
+    pub chat_params_offset: usize,
+    pub chat_messages_area: Rect,
+    pub chat_composer_area: Rect,
 }
 
 pub struct AppState {
@@ -172,6 +321,7 @@ pub struct AppState {
     pub config_dirty: bool,
     pub active_tab: ActiveTab,
     pub config_focus: ConfigFocus,
+    pub config_settings_scroll: u16,
     pub editing_prompt: bool,
     pub prompt: String,
     pub run_title: String,
@@ -190,6 +340,19 @@ pub struct AppState {
     pub waterfall_desc: bool,
     pub waterfall_selected_idx: usize,
     pub output_scroll: u16,
+    pub chat_focus: ChatFocus,
+    pub chat_target_id: String,
+    pub chat_selected_param_idx: usize,
+    pub chat_editing_param: bool,
+    pub chat_adding_param: bool,
+    pub chat_param_input: String,
+    pub chat_editing_composer: bool,
+    pub chat_input: String,
+    pub chat_messages: Vec<ChatTurnMessage>,
+    pub chat_scroll: u16,
+    pub chat_running: bool,
+    pub chat_active_assistant_idx: Option<usize>,
+    pub chat_last_result: Option<ModelRunResult>,
     pub layout_zones: UiLayoutZones,
     pub results: HashMap<String, ModelRunResult>,
     pub history: Vec<BenchmarkRunRecord>,
@@ -209,6 +372,13 @@ impl AppState {
     ) -> Self {
         let history = load_history(config.ui.history_limit);
         let first_suite = &PROMPT_SUITES[0];
+        let default_chat_target = config
+            .enabled_targets()
+            .first()
+            .or_else(|| config.targets.first())
+            .map(|t| t.id.clone())
+            .unwrap_or_default();
+        let initial_prompt = first_suite.prompt.to_string();
         let status_message = if from_disk {
             format!("Loaded config: {}", config_path.display())
         } else {
@@ -224,8 +394,9 @@ impl AppState {
             config_dirty: !from_disk,
             active_tab: ActiveTab::PromptSuites,
             config_focus: ConfigFocus::Providers,
+            config_settings_scroll: 0,
             editing_prompt: false,
-            prompt: first_suite.prompt.to_string(),
+            prompt: initial_prompt.clone(),
             run_title: first_suite.title.to_string(),
             selected_suite_idx: 0,
             selected_result_idx: 0,
@@ -242,6 +413,22 @@ impl AppState {
             waterfall_desc: false,
             waterfall_selected_idx: 0,
             output_scroll: 0,
+            chat_focus: ChatFocus::Params,
+            chat_target_id: default_chat_target,
+            chat_selected_param_idx: 0,
+            chat_editing_param: false,
+            chat_adding_param: false,
+            chat_param_input: String::new(),
+            chat_editing_composer: false,
+            chat_input: String::new(),
+            chat_messages: vec![ChatTurnMessage {
+                role: "user".to_string(),
+                content: initial_prompt,
+            }],
+            chat_scroll: 0,
+            chat_running: false,
+            chat_active_assistant_idx: None,
+            chat_last_result: None,
             layout_zones: UiLayoutZones::default(),
             results: HashMap::new(),
             history,
@@ -658,7 +845,11 @@ impl AppState {
     pub fn abort_run(&mut self) {
         if let Some(ref tx) = self.abort_tx {
             let _ = tx.send(true);
-            self.status_message = "Aborting active run...".to_string();
+            self.status_message = if self.chat_running {
+                "Aborting active chat request...".to_string()
+            } else {
+                "Aborting active run...".to_string()
+            };
         }
     }
 
@@ -688,6 +879,50 @@ impl AppState {
                     });
                 }
                 self.status_message = "Benchmark batch finished and saved to local history.".to_string();
+            }
+            EngineEvent::ChatUpdate(res) => {
+                let text = if !res.output.is_empty() {
+                    if let Some(ref err) = res.error {
+                        format!("{}\n\n[ERROR: {}]", res.output, err)
+                    } else {
+                        res.output.clone()
+                    }
+                } else if let Some(ref err) = res.error {
+                    if let Some(ref adv) = res.advice {
+                        format!("ERROR: {}\nADVICE: {}", err, adv)
+                    } else {
+                        format!("ERROR: {}", err)
+                    }
+                } else {
+                    "...".to_string()
+                };
+
+                if let Some(idx) = self.chat_active_assistant_idx {
+                    if let Some(msg) = self.chat_messages.get_mut(idx) {
+                        msg.content = text;
+                    }
+                } else {
+                    self.chat_messages.push(ChatTurnMessage {
+                        role: "assistant".to_string(),
+                        content: text,
+                    });
+                    self.chat_active_assistant_idx = Some(self.chat_messages.len() - 1);
+                }
+                self.chat_last_result = Some(res);
+            }
+            EngineEvent::ChatFinished => {
+                self.chat_running = false;
+                self.chat_active_assistant_idx = None;
+                self.abort_tx = None;
+                if let Some(ref res) = self.chat_last_result {
+                    self.results.insert(res.target_id.clone(), res.clone());
+                    self.status_message = format!(
+                        "Chat reply from {} finished ({:.1} tok/s, {:.0} ms)",
+                        res.model_name, res.tokens_per_sec, res.timing.total_ms
+                    );
+                } else {
+                    self.status_message = "Chat turn finished.".to_string();
+                }
             }
             EngineEvent::ModelsRefreshed {
                 provider_id,
@@ -994,6 +1229,90 @@ impl AppState {
             }
         }
 
+        if self.active_tab == ActiveTab::Chat && self.chat_adding_param {
+            match key.code {
+                KeyCode::Esc => {
+                    self.chat_adding_param = false;
+                    self.chat_param_input.clear();
+                    self.status_message = "Add custom param cancelled.".to_string();
+                }
+                KeyCode::Enter => {
+                    self.commit_add_chat_param();
+                }
+                KeyCode::Backspace => {
+                    self.chat_param_input.pop();
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.chat_param_input.clear();
+                }
+                KeyCode::Char(c) => {
+                    self.chat_param_input.push(c);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        if self.active_tab == ActiveTab::Chat && self.chat_editing_param {
+            match key.code {
+                KeyCode::Esc => {
+                    self.chat_editing_param = false;
+                    self.chat_param_input.clear();
+                    self.status_message = "Parameter edit cancelled.".to_string();
+                }
+                KeyCode::Enter => {
+                    self.commit_chat_param_edit();
+                }
+                KeyCode::Backspace => {
+                    self.chat_param_input.pop();
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.chat_param_input.clear();
+                }
+                KeyCode::Char(c) => {
+                    self.chat_param_input.push(c);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        if self.active_tab == ActiveTab::Chat && self.chat_editing_composer {
+            match key.code {
+                KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.chat_scroll = self.chat_scroll.saturating_sub(3);
+                }
+                KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.chat_scroll = self.chat_scroll.saturating_add(3);
+                }
+                KeyCode::Esc => {
+                    self.chat_editing_composer = false;
+                    self.chat_focus = ChatFocus::Messages;
+                    self.status_message = "Exited chat composer.".to_string();
+                }
+                KeyCode::Enter
+                    if key.modifiers.contains(KeyModifiers::SHIFT)
+                        || key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    self.chat_input.push('\n');
+                }
+                KeyCode::Enter => {
+                    self.send_chat_turn();
+                }
+                KeyCode::Backspace => {
+                    self.chat_input.pop();
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.chat_input.clear();
+                }
+                KeyCode::Char(c) => {
+                    self.chat_input.push(c);
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('1') => self.active_tab = ActiveTab::PromptSuites,
@@ -1002,15 +1321,21 @@ impl AppState {
             KeyCode::Char('4') => self.active_tab = ActiveTab::DiffCompare,
             KeyCode::Char('5') => self.active_tab = ActiveTab::CapabilityGraph,
             KeyCode::Char('6') => self.active_tab = ActiveTab::ConfigEditor,
+            KeyCode::Char('7') => self.active_tab = ActiveTab::Chat,
             KeyCode::Char('t') => {
                 self.config.ui.theme = self.config.ui.theme.next();
                 self.config_dirty = true;
                 self.status_message = format!("Theme: {}", self.config.ui.theme.label());
             }
+            KeyCode::Char('r') if self.active_tab == ActiveTab::Chat => self.send_chat_turn(),
             KeyCode::Char('r') => self.start_run(false),
             KeyCode::Char('R') => self.start_run(true),
             KeyCode::Char('x') => self.abort_run(),
             KeyCode::Char('s') => self.save_config(),
+            KeyCode::Char('e') if self.active_tab == ActiveTab::Chat => {
+                self.chat_focus = ChatFocus::Params;
+                self.begin_edit_chat_param();
+            }
             KeyCode::Char('e') => self.export_results(),
             KeyCode::Char('L') => self.import_latest_results(),
             KeyCode::Char('z') => self.load_ping_probe(),
@@ -1021,6 +1346,23 @@ impl AppState {
                 self.editing_prompt = true;
                 self.status_message = "Editing prompt (press Esc when done)".to_string();
             }
+            KeyCode::Char('i') if self.active_tab == ActiveTab::Chat => {
+                self.chat_focus = ChatFocus::Composer;
+                self.chat_editing_composer = true;
+                self.status_message = "Chat composer active (Enter to send, Shift+Enter newline, Esc exit)".to_string();
+            }
+            KeyCode::Char('c') if self.active_tab == ActiveTab::Chat => {
+                self.chat_messages.clear();
+                if !self.prompt.trim().is_empty() {
+                    self.chat_messages.push(ChatTurnMessage {
+                        role: "user".to_string(),
+                        content: self.prompt.clone(),
+                    });
+                }
+                self.chat_last_result = None;
+                self.chat_scroll = 0;
+                self.status_message = "Reset chat conversation to active prompt.".to_string();
+            }
             KeyCode::BackTab if self.active_tab == ActiveTab::ConfigEditor => {
                 self.cycle_config_canvas();
             }
@@ -1030,15 +1372,17 @@ impl AppState {
             {
                 self.cycle_config_canvas();
             }
+            KeyCode::BackTab if self.active_tab == ActiveTab::Chat => {
+                self.cycle_chat_focus();
+            }
+            KeyCode::Tab
+                if self.active_tab == ActiveTab::Chat
+                    && key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                self.cycle_chat_focus();
+            }
             KeyCode::Tab => {
-                self.active_tab = match self.active_tab {
-                    ActiveTab::PromptSuites => ActiveTab::Responses,
-                    ActiveTab::Responses => ActiveTab::Waterfall,
-                    ActiveTab::Waterfall => ActiveTab::DiffCompare,
-                    ActiveTab::DiffCompare => ActiveTab::CapabilityGraph,
-                    ActiveTab::CapabilityGraph => ActiveTab::ConfigEditor,
-                    ActiveTab::ConfigEditor => ActiveTab::PromptSuites,
-                };
+                self.active_tab = self.active_tab.next();
             }
             KeyCode::Char('/') | KeyCode::Char('f')
                 if self.active_tab == ActiveTab::ConfigEditor =>
@@ -1047,15 +1391,106 @@ impl AppState {
                 self.status_message =
                     "Filtering models (type query, Enter/Down for list, Esc clear)".to_string();
             }
+            KeyCode::Up
+                if self.active_tab == ActiveTab::Responses
+                    && key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                self.output_scroll = self.output_scroll.saturating_sub(3);
+            }
+            KeyCode::Down
+                if self.active_tab == ActiveTab::Responses
+                    && key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                self.output_scroll = self.output_scroll.saturating_add(3);
+            }
+            KeyCode::Up
+                if self.active_tab == ActiveTab::Chat
+                    && key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                self.chat_scroll = self.chat_scroll.saturating_sub(3);
+            }
+            KeyCode::Down
+                if self.active_tab == ActiveTab::Chat
+                    && key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                self.chat_scroll = self.chat_scroll.saturating_add(3);
+            }
+            KeyCode::PageDown if self.active_tab == ActiveTab::Chat => {
+                let max_idx = self.chat_config_rows().len().saturating_sub(1);
+                match self.chat_focus {
+                    ChatFocus::Params => {
+                        self.chat_selected_param_idx = (self.chat_selected_param_idx + 5).min(max_idx);
+                    }
+                    _ => {
+                        self.chat_scroll = self.chat_scroll.saturating_add(6);
+                    }
+                }
+            }
+            KeyCode::PageUp if self.active_tab == ActiveTab::Chat => {
+                match self.chat_focus {
+                    ChatFocus::Params => {
+                        self.chat_selected_param_idx = self.chat_selected_param_idx.saturating_sub(5);
+                    }
+                    _ => {
+                        self.chat_scroll = self.chat_scroll.saturating_sub(6);
+                    }
+                }
+            }
             KeyCode::Up | KeyCode::Char('k') => self.navigate_up(),
             KeyCode::Down | KeyCode::Char('j') => self.navigate_down(),
+            KeyCode::Enter if self.active_tab == ActiveTab::PromptSuites => {
+                self.open_chat_from_prompt();
+            }
+            KeyCode::Enter if self.active_tab == ActiveTab::Responses => {
+                self.open_chat_from_selected_response();
+            }
+            KeyCode::Enter if self.active_tab == ActiveTab::Waterfall => {
+                self.open_chat_from_waterfall();
+            }
             KeyCode::Enter
                 if self.active_tab == ActiveTab::ConfigEditor
                     && self.config_focus == ConfigFocus::Subgroups =>
             {
                 self.solo_selected_subgroup();
             }
-            KeyCode::Enter | KeyCode::Char(' ') => self.activate_selected(),
+            KeyCode::Enter if self.active_tab == ActiveTab::Chat => {
+                match self.chat_focus {
+                    ChatFocus::Params => self.begin_edit_chat_param(),
+                    ChatFocus::Messages => {
+                        self.chat_focus = ChatFocus::Composer;
+                        self.chat_editing_composer = true;
+                        self.status_message = "Chat composer active (Enter to send, Esc exit)".to_string();
+                    }
+                    ChatFocus::Composer => self.send_chat_turn(),
+                }
+            }
+            KeyCode::Char(' ') => self.activate_selected(),
+            KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Char('+')
+                if self.active_tab == ActiveTab::Chat && self.chat_focus == ChatFocus::Params =>
+            {
+                self.start_add_chat_param();
+            }
+            KeyCode::Delete | KeyCode::Backspace
+                if self.active_tab == ActiveTab::Chat && self.chat_focus == ChatFocus::Params =>
+            {
+                self.remove_selected_custom_chat_param();
+            }
+            KeyCode::Left | KeyCode::Char('-') | KeyCode::Char('h')
+                if self.active_tab == ActiveTab::Chat && self.chat_focus == ChatFocus::Params =>
+            {
+                self.step_chat_param(-1);
+            }
+            KeyCode::Right | KeyCode::Char('=') | KeyCode::Char('l')
+                if self.active_tab == ActiveTab::Chat && self.chat_focus == ChatFocus::Params =>
+            {
+                self.step_chat_param(1);
+            }
+            KeyCode::Left | KeyCode::Char('h') if self.active_tab == ActiveTab::Chat => {
+                self.chat_focus = ChatFocus::Params;
+            }
+            KeyCode::Right | KeyCode::Char('l') if self.active_tab == ActiveTab::Chat => {
+                self.chat_focus = ChatFocus::Messages;
+            }
             KeyCode::Char('+') | KeyCode::Char('=') if self.active_tab == ActiveTab::ConfigEditor => {
                 self.config.execution.concurrency = (self.config.execution.concurrency + 1).min(100);
                 self.config_dirty = true;
@@ -1081,10 +1516,7 @@ impl AppState {
                 self.config_dirty = true;
             }
             KeyCode::Char('m') if self.active_tab == ActiveTab::ConfigEditor => {
-                self.config.execution.mode = match self.config.execution.mode {
-                    ExecutionMode::Parallel => ExecutionMode::Sequential,
-                    ExecutionMode::Sequential => ExecutionMode::Parallel,
-                };
+                self.config.execution.mode = self.config.execution.mode.toggle();
                 self.config_dirty = true;
             }
             KeyCode::Char('v') if self.active_tab == ActiveTab::ConfigEditor => {
@@ -1234,6 +1666,14 @@ impl AppState {
                     self.selected_subgroup_idx = self.selected_subgroup_idx.saturating_sub(1);
                 }
             },
+            ActiveTab::Chat => match self.chat_focus {
+                ChatFocus::Params => {
+                    self.chat_selected_param_idx = self.chat_selected_param_idx.saturating_sub(1);
+                }
+                ChatFocus::Messages | ChatFocus::Composer => {
+                    self.chat_scroll = self.chat_scroll.saturating_sub(2);
+                }
+            },
             _ => {}
         }
     }
@@ -1278,6 +1718,17 @@ impl AppState {
                     if self.selected_subgroup_idx + 1 < self.config.subgroups.len() {
                         self.selected_subgroup_idx += 1;
                     }
+                }
+            },
+            ActiveTab::Chat => match self.chat_focus {
+                ChatFocus::Params => {
+                    let max_idx = self.chat_config_rows().len().saturating_sub(1);
+                    if self.chat_selected_param_idx < max_idx {
+                        self.chat_selected_param_idx += 1;
+                    }
+                }
+                ChatFocus::Messages | ChatFocus::Composer => {
+                    self.chat_scroll = self.chat_scroll.saturating_add(2);
                 }
             },
             _ => {}
@@ -1348,6 +1799,11 @@ impl AppState {
                     }
                 }
             },
+            ActiveTab::Chat => {
+                if self.chat_focus == ChatFocus::Params {
+                    self.toggle_chat_row_activation();
+                }
+            }
             _ => {}
         }
     }
@@ -1370,6 +1826,892 @@ impl AppState {
         self.status_message = format!(
             "Opened response for {} ({})",
             chosen.model_name, chosen.provider_name
+        );
+    }
+
+    pub fn active_chat_target(&self) -> Option<&TargetConfig> {
+        self.config
+            .targets
+            .iter()
+            .find(|t| t.id == self.chat_target_id)
+            .or_else(|| self.config.enabled_targets().into_iter().next())
+            .or_else(|| self.config.targets.first())
+    }
+
+    fn cycle_chat_focus(&mut self) {
+        self.chat_focus = match self.chat_focus {
+            ChatFocus::Params => ChatFocus::Messages,
+            ChatFocus::Messages => ChatFocus::Composer,
+            ChatFocus::Composer => ChatFocus::Params,
+        };
+        self.chat_editing_composer = self.chat_focus == ChatFocus::Composer;
+    }
+
+    pub fn chat_config_rows(&self) -> Vec<ChatConfigRow> {
+        let mut rows: Vec<ChatConfigRow> = CHAT_PARAM_FIELDS
+            .iter()
+            .copied()
+            .map(ChatConfigRow::Builtin)
+            .collect();
+        for idx in 0..self.config.execution.extra_params.len() {
+            rows.push(ChatConfigRow::Custom(idx));
+        }
+        rows.push(ChatConfigRow::AddParam);
+        rows
+    }
+
+    pub fn selected_chat_row(&self) -> ChatConfigRow {
+        let rows = self.chat_config_rows();
+        let idx = self.chat_selected_param_idx.min(rows.len().saturating_sub(1));
+        rows[idx]
+    }
+
+    pub fn is_chat_field_activated(&self, field: ChatParamField) -> Option<bool> {
+        let act = &self.config.execution.active_params;
+        match field {
+            ChatParamField::CustomHeaders => Some(act.custom_headers),
+            ChatParamField::CustomEndpoint => Some(act.custom_endpoint),
+            ChatParamField::Stream => Some(act.stream && self.config.execution.stream),
+            ChatParamField::Temperature => Some(act.temperature),
+            ChatParamField::TopP => Some(act.top_p),
+            ChatParamField::MaxTokens => Some(act.max_tokens),
+            ChatParamField::Seed => Some(act.seed),
+            ChatParamField::TtsVoice => Some(act.tts_voice),
+            ChatParamField::SystemPromptEnabled => Some(self.config.system_prompt.enabled),
+            ChatParamField::EndpointFilesCount => Some(act.endpoint_files),
+            _ => None,
+        }
+    }
+
+    pub fn toggle_chat_row_activation(&mut self) {
+        match self.selected_chat_row() {
+            ChatConfigRow::AddParam => self.start_add_chat_param(),
+            ChatConfigRow::Custom(idx) => {
+                if let Some(param) = self.config.execution.extra_params.get_mut(idx) {
+                    param.enabled = !param.enabled;
+                    let key = param.key.clone();
+                    let active = param.enabled;
+                    self.config_dirty = true;
+                    self.status_message = format!(
+                        "Custom param '{}' active: {}",
+                        key,
+                        if active { "ON [x]" } else { "OFF [ ]" }
+                    );
+                }
+            }
+            ChatConfigRow::Builtin(field) => {
+                let act = &mut self.config.execution.active_params;
+                let mut toggled = true;
+                let new_state = match field {
+                    ChatParamField::CustomHeaders => {
+                        act.custom_headers = !act.custom_headers;
+                        act.custom_headers
+                    }
+                    ChatParamField::CustomEndpoint => {
+                        act.custom_endpoint = !act.custom_endpoint;
+                        act.custom_endpoint
+                    }
+                    ChatParamField::Stream => {
+                        let next = !(act.stream && self.config.execution.stream);
+                        act.stream = next;
+                        self.config.execution.stream = next;
+                        next
+                    }
+                    ChatParamField::Temperature => {
+                        act.temperature = !act.temperature;
+                        act.temperature
+                    }
+                    ChatParamField::TopP => {
+                        act.top_p = !act.top_p;
+                        act.top_p
+                    }
+                    ChatParamField::MaxTokens => {
+                        act.max_tokens = !act.max_tokens;
+                        act.max_tokens
+                    }
+                    ChatParamField::Seed => {
+                        act.seed = !act.seed;
+                        act.seed
+                    }
+                    ChatParamField::TtsVoice => {
+                        act.tts_voice = !act.tts_voice;
+                        act.tts_voice
+                    }
+                    ChatParamField::SystemPromptEnabled => {
+                        self.config.system_prompt.enabled = !self.config.system_prompt.enabled;
+                        self.config.system_prompt.enabled
+                    }
+                    ChatParamField::EndpointFilesCount => {
+                        act.endpoint_files = !act.endpoint_files;
+                        act.endpoint_files
+                    }
+                    _ => {
+                        toggled = false;
+                        true
+                    }
+                };
+                if toggled {
+                    self.config_dirty = true;
+                    self.status_message = format!(
+                        "{} {}",
+                        field.label(),
+                        if new_state {
+                            "activated [x] for sending"
+                        } else {
+                            "deactivated [ ] (omitted on send)"
+                        }
+                    );
+                } else {
+                    self.begin_edit_chat_param();
+                }
+            }
+        }
+    }
+
+    pub fn start_add_chat_param(&mut self) {
+        self.chat_editing_param = false;
+        self.chat_adding_param = true;
+        self.chat_param_input.clear();
+        self.status_message =
+            "Add Param: type key=value (e.g. presence_penalty=0.2), Enter Add, Esc Cancel"
+                .to_string();
+    }
+
+    pub fn commit_add_chat_param(&mut self) {
+        let raw = self.chat_param_input.trim().to_string();
+        let (raw_key, raw_val) = if let Some((k, v)) = raw.split_once('=').or_else(|| raw.split_once(':')) {
+            (k.trim(), v.trim())
+        } else {
+            (raw.as_str(), "true")
+        };
+        let key = if raw_key.is_empty() {
+            format!("param_{}", self.config.execution.extra_params.len() + 1)
+        } else {
+            raw_key.to_string()
+        };
+        let value = if raw_val.is_empty() {
+            "true".to_string()
+        } else {
+            raw_val.to_string()
+        };
+        self.config.execution.extra_params.push(CustomSendParam {
+            key: key.clone(),
+            value: value.clone(),
+            enabled: true,
+        });
+        let new_row_idx = CHAT_PARAM_FIELDS.len() + self.config.execution.extra_params.len() - 1;
+        self.chat_selected_param_idx = new_row_idx;
+        self.chat_adding_param = false;
+        self.chat_param_input.clear();
+        self.config_dirty = true;
+        self.status_message = format!("Added custom param: {} = {}", key, value);
+    }
+
+    pub fn remove_selected_custom_chat_param(&mut self) {
+        if let ChatConfigRow::Custom(idx) = self.selected_chat_row() {
+            if idx < self.config.execution.extra_params.len() {
+                let removed = self.config.execution.extra_params.remove(idx);
+                self.config_dirty = true;
+                let max_idx = self.chat_config_rows().len().saturating_sub(1);
+                if self.chat_selected_param_idx > max_idx {
+                    self.chat_selected_param_idx = max_idx;
+                }
+                self.status_message = format!("Removed custom param '{}'", removed.key);
+            }
+        }
+    }
+
+    pub fn chat_param_display_value(&self, field: ChatParamField) -> String {
+        let target_opt = self.active_chat_target();
+        let provider_opt = target_opt.and_then(|t| self.config.find_provider(&t.provider_id));
+        match field {
+            ChatParamField::TargetModel => target_opt
+                .map(|t| t.model.clone())
+                .unwrap_or_else(|| "<none>".to_string()),
+            ChatParamField::ProviderName => provider_opt
+                .map(|p| format!("{} ({})", p.name, p.id))
+                .unwrap_or_else(|| "<none>".to_string()),
+            ChatParamField::BaseUrl => provider_opt
+                .map(|p| p.base_url.clone())
+                .unwrap_or_default(),
+            ChatParamField::ApiKeyEnv => provider_opt
+                .map(|p| {
+                    if p.api_key_env.trim().is_empty() {
+                        "<none>".to_string()
+                    } else {
+                        p.api_key_env.clone()
+                    }
+                })
+                .unwrap_or_default(),
+            ChatParamField::ApiKeyInline => provider_opt
+                .map(|p| {
+                    let k = p.api_key.trim();
+                    if k.is_empty() {
+                        "<empty>".to_string()
+                    } else if k.len() <= 8 {
+                        "********".to_string()
+                    } else {
+                        format!("{}...{}", &k[..4], &k[k.len() - 4..])
+                    }
+                })
+                .unwrap_or_default(),
+            ChatParamField::CustomHeaders => provider_opt
+                .map(|p| {
+                    if p.custom_headers.is_empty() {
+                        "<none>".to_string()
+                    } else {
+                        let mut pairs: Vec<String> = p
+                            .custom_headers
+                            .iter()
+                            .map(|(k, v)| format!("{}: {}", k, v))
+                            .collect();
+                        pairs.sort();
+                        pairs.join("; ")
+                    }
+                })
+                .unwrap_or_default(),
+            ChatParamField::EndpointType => self.config.execution.endpoint_type.label().to_string(),
+            ChatParamField::CustomEndpoint => {
+                if self.config.execution.custom_endpoint.trim().is_empty() {
+                    "<auto /chat/completions>".to_string()
+                } else {
+                    self.config.execution.custom_endpoint.clone()
+                }
+            }
+            ChatParamField::Stream => self.config.execution.stream.to_string(),
+            ChatParamField::TimeoutSec => format!("{}s", self.config.execution.timeout_sec),
+            ChatParamField::Temperature => format!("{:.2}", self.config.execution.temperature),
+            ChatParamField::TopP => format!("{:.2}", self.config.execution.top_p),
+            ChatParamField::MaxTokens => self.config.execution.max_tokens.to_string(),
+            ChatParamField::Seed => self
+                .config
+                .execution
+                .seed
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "<none>".to_string()),
+            ChatParamField::TtsVoice => self.config.execution.tts_voice.clone(),
+            ChatParamField::SystemPromptEnabled => self.config.system_prompt.enabled.to_string(),
+            ChatParamField::SystemPersona => self
+                .config
+                .system_prompt
+                .persona
+                .as_deref()
+                .map(|id| match crate::suites::lookup_persona(id) {
+                    Some(p) => format!("{} [{}]", p.name, p.category),
+                    None => id.to_string(),
+                })
+                .unwrap_or_else(|| "<none>".to_string()),
+            ChatParamField::SystemPromptContent => {
+                if self.config.system_prompt.content.trim().is_empty() {
+                    "<empty (uses persona if set)>".to_string()
+                } else {
+                    self.config.system_prompt.content.clone()
+                }
+            }
+            ChatParamField::TargetSystemOverride => target_opt
+                .and_then(|t| t.system_prompt_override.as_ref())
+                .map(|s| s.clone())
+                .unwrap_or_else(|| "<none>".to_string()),
+            ChatParamField::EndpointFilesCount => format!(
+                "{} active / {} total",
+                self.config.matching_endpoint_files().len(),
+                self.config.endpoint_files.len()
+            ),
+            ChatParamField::ExecutionMode => match self.config.execution.mode {
+                ExecutionMode::Parallel => "Parallel".to_string(),
+                ExecutionMode::Sequential => "Sequential".to_string(),
+            },
+            ChatParamField::Concurrency => format!("{}/100", self.config.execution.concurrency),
+            ChatParamField::RandomizeOrder => self.config.execution.randomize_order.to_string(),
+        }
+    }
+
+    fn chat_param_raw_edit_value(&self, field: ChatParamField) -> String {
+        let target_opt = self.active_chat_target();
+        let provider_opt = target_opt.and_then(|t| self.config.find_provider(&t.provider_id));
+        match field {
+            ChatParamField::BaseUrl => provider_opt.map(|p| p.base_url.clone()).unwrap_or_default(),
+            ChatParamField::ApiKeyEnv => provider_opt.map(|p| p.api_key_env.clone()).unwrap_or_default(),
+            ChatParamField::ApiKeyInline => provider_opt.map(|p| p.api_key.clone()).unwrap_or_default(),
+            ChatParamField::CustomHeaders => provider_opt
+                .map(|p| {
+                    let mut pairs: Vec<String> = p
+                        .custom_headers
+                        .iter()
+                        .map(|(k, v)| format!("{}: {}", k, v))
+                        .collect();
+                    pairs.sort();
+                    pairs.join("; ")
+                })
+                .unwrap_or_default(),
+            ChatParamField::CustomEndpoint => self.config.execution.custom_endpoint.clone(),
+            ChatParamField::TimeoutSec => self.config.execution.timeout_sec.to_string(),
+            ChatParamField::Temperature => format!("{:.2}", self.config.execution.temperature),
+            ChatParamField::TopP => format!("{:.2}", self.config.execution.top_p),
+            ChatParamField::MaxTokens => self.config.execution.max_tokens.to_string(),
+            ChatParamField::Seed => self
+                .config
+                .execution
+                .seed
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
+            ChatParamField::TtsVoice => self.config.execution.tts_voice.clone(),
+            ChatParamField::SystemPromptContent => self.config.system_prompt.content.clone(),
+            ChatParamField::TargetSystemOverride => target_opt
+                .and_then(|t| t.system_prompt_override.clone())
+                .unwrap_or_default(),
+            ChatParamField::Concurrency => self.config.execution.concurrency.to_string(),
+            _ => self.chat_param_display_value(field),
+        }
+    }
+
+    pub fn begin_edit_chat_param(&mut self) {
+        match self.selected_chat_row() {
+            ChatConfigRow::AddParam => self.start_add_chat_param(),
+            ChatConfigRow::Custom(idx) => {
+                if let Some(param) = self.config.execution.extra_params.get(idx) {
+                    self.chat_param_input = format!("{}={}", param.key, param.value);
+                    self.chat_adding_param = false;
+                    self.chat_editing_param = true;
+                    self.status_message = format!(
+                        "Editing custom param '{}' (key=value, Enter apply, Esc cancel)",
+                        param.key
+                    );
+                }
+            }
+            ChatConfigRow::Builtin(field) => {
+                if field.is_toggle_or_cycle() {
+                    self.step_chat_param(1);
+                    return;
+                }
+                self.chat_param_input = self.chat_param_raw_edit_value(field);
+                self.chat_adding_param = false;
+                self.chat_editing_param = true;
+                self.status_message =
+                    format!("Editing {}: type new value, Enter commit, Esc cancel", field.label());
+            }
+        }
+    }
+
+    pub fn commit_chat_param_edit(&mut self) {
+        let raw = self.chat_param_input.trim().to_string();
+        match self.selected_chat_row() {
+            ChatConfigRow::AddParam => {
+                self.chat_editing_param = false;
+                self.chat_param_input.clear();
+            }
+            ChatConfigRow::Custom(idx) => {
+                if let Some(param) = self.config.execution.extra_params.get_mut(idx) {
+                    if let Some((k, v)) = raw.split_once('=').or_else(|| raw.split_once(':')) {
+                        let key = k.trim();
+                        if !key.is_empty() {
+                            param.key = key.to_string();
+                        }
+                        param.value = v.trim().to_string();
+                    } else if !raw.is_empty() {
+                        param.value = raw.clone();
+                    }
+                    self.config_dirty = true;
+                    self.status_message =
+                        format!("Updated custom param: {} = {}", param.key, param.value);
+                }
+                self.chat_editing_param = false;
+                self.chat_param_input.clear();
+            }
+            ChatConfigRow::Builtin(field) => {
+                let target_id = self
+                    .active_chat_target()
+                    .map(|t| t.id.clone())
+                    .unwrap_or_default();
+                let provider_id = self
+                    .config
+                    .targets
+                    .iter()
+                    .find(|t| t.id == target_id)
+                    .map(|t| t.provider_id.clone())
+                    .unwrap_or_default();
+
+                let mut updated = true;
+                match field {
+                    ChatParamField::BaseUrl => {
+                        if let Some(p) = self.config.find_provider_mut(&provider_id) {
+                            p.base_url = raw.clone();
+                        }
+                    }
+                    ChatParamField::ApiKeyEnv => {
+                        if let Some(p) = self.config.find_provider_mut(&provider_id) {
+                            p.api_key_env = raw.clone();
+                        }
+                    }
+                    ChatParamField::ApiKeyInline => {
+                        if let Some(p) = self.config.find_provider_mut(&provider_id) {
+                            p.api_key = raw.clone();
+                        }
+                    }
+                    ChatParamField::CustomHeaders => {
+                        if let Some(p) = self.config.find_provider_mut(&provider_id) {
+                            p.custom_headers.clear();
+                            for entry in raw.split(';') {
+                                let part = entry.trim();
+                                if part.is_empty() {
+                                    continue;
+                                }
+                                if let Some((k, v)) =
+                                    part.split_once(':').or_else(|| part.split_once('='))
+                                {
+                                    let key = k.trim();
+                                    if !key.is_empty() {
+                                        p.custom_headers
+                                            .insert(key.to_string(), v.trim().to_string());
+                                    }
+                                }
+                            }
+                            self.config.execution.active_params.custom_headers =
+                                !p.custom_headers.is_empty();
+                        }
+                    }
+                    ChatParamField::CustomEndpoint => {
+                        self.config.execution.custom_endpoint = raw.clone();
+                        if !raw.is_empty() {
+                            self.config.execution.active_params.custom_endpoint = true;
+                        }
+                    }
+                    ChatParamField::TimeoutSec => match raw.parse::<u64>() {
+                        Ok(v) => self.config.execution.timeout_sec = v.clamp(5, 600),
+                        Err(_) => {
+                            updated = false;
+                            self.status_message = "Invalid timeout integer (5..600).".to_string();
+                        }
+                    },
+                    ChatParamField::Temperature => match raw.parse::<f32>() {
+                        Ok(v) => {
+                            self.config.execution.temperature = v.clamp(0.0, 2.0);
+                            self.config.execution.active_params.temperature = true;
+                        }
+                        Err(_) => {
+                            updated = false;
+                            self.status_message = "Invalid temperature float (0.0..2.0).".to_string();
+                        }
+                    },
+                    ChatParamField::TopP => match raw.parse::<f32>() {
+                        Ok(v) => {
+                            self.config.execution.top_p = v.clamp(0.0, 1.0);
+                            self.config.execution.active_params.top_p = true;
+                        }
+                        Err(_) => {
+                            updated = false;
+                            self.status_message = "Invalid top_p float (0.0..1.0).".to_string();
+                        }
+                    },
+                    ChatParamField::MaxTokens => match raw.parse::<u32>() {
+                        Ok(v) => {
+                            self.config.execution.max_tokens = v.min(1_000_000);
+                            self.config.execution.active_params.max_tokens = v > 0;
+                        }
+                        Err(_) => {
+                            updated = false;
+                            self.status_message = "Invalid max_tokens integer.".to_string();
+                        }
+                    },
+                    ChatParamField::Seed => {
+                        if raw.is_empty() || raw.eq_ignore_ascii_case("none") {
+                            self.config.execution.seed = None;
+                        } else {
+                            match raw.parse::<u64>() {
+                                Ok(v) => {
+                                    self.config.execution.seed = Some(v);
+                                    self.config.execution.active_params.seed = true;
+                                }
+                                Err(_) => {
+                                    updated = false;
+                                    self.status_message =
+                                        "Invalid seed integer (or empty to clear).".to_string();
+                                }
+                            }
+                        }
+                    }
+                    ChatParamField::TtsVoice => {
+                        self.config.execution.tts_voice = if raw.is_empty() {
+                            "alloy".to_string()
+                        } else {
+                            self.config.execution.active_params.tts_voice = true;
+                            raw.clone()
+                        };
+                    }
+                    ChatParamField::SystemPromptContent => {
+                        self.config.system_prompt.content = raw.clone();
+                        if !raw.is_empty() {
+                            self.config.system_prompt.enabled = true;
+                        }
+                    }
+                    ChatParamField::TargetSystemOverride => {
+                        if let Some(t) = self.config.targets.iter_mut().find(|t| t.id == target_id) {
+                            t.system_prompt_override =
+                                if raw.is_empty() { None } else { Some(raw.clone()) };
+                        }
+                    }
+                    ChatParamField::Concurrency => match raw.parse::<usize>() {
+                        Ok(v) => self.config.execution.concurrency = v.clamp(1, 100),
+                        Err(_) => {
+                            updated = false;
+                            self.status_message = "Invalid threads integer (1..100).".to_string();
+                        }
+                    },
+                    _ => {}
+                }
+
+                if updated {
+                    self.config_dirty = true;
+                    self.status_message =
+                        format!("Updated {}: {}", field.label(), self.chat_param_display_value(field));
+                }
+                self.chat_editing_param = false;
+                self.chat_param_input.clear();
+            }
+        }
+    }
+
+    pub fn step_chat_param(&mut self, dir: i32) {
+        let field = match self.selected_chat_row() {
+            ChatConfigRow::Builtin(f) => f,
+            ChatConfigRow::Custom(_) | ChatConfigRow::AddParam => {
+                self.toggle_chat_row_activation();
+                return;
+            }
+        };
+        let target_id = self
+            .active_chat_target()
+            .map(|t| t.id.clone())
+            .unwrap_or_default();
+
+        match field {
+            ChatParamField::TargetModel => {
+                if !self.config.targets.is_empty() {
+                    let cur = self
+                        .config
+                        .targets
+                        .iter()
+                        .position(|t| t.id == target_id)
+                        .unwrap_or(0);
+                    let len = self.config.targets.len();
+                    let next = if dir >= 0 {
+                        (cur + 1) % len
+                    } else if cur == 0 {
+                        len - 1
+                    } else {
+                        cur - 1
+                    };
+                    self.chat_target_id = self.config.targets[next].id.clone();
+                }
+            }
+            ChatParamField::ProviderName => {
+                if !self.config.providers.is_empty() {
+                    let cur_pid = self
+                        .config
+                        .targets
+                        .iter()
+                        .find(|t| t.id == target_id)
+                        .map(|t| t.provider_id.as_str())
+                        .unwrap_or("");
+                    let cur = self
+                        .config
+                        .providers
+                        .iter()
+                        .position(|p| p.id == cur_pid)
+                        .unwrap_or(0);
+                    let len = self.config.providers.len();
+                    let next_p_idx = if dir >= 0 {
+                        (cur + 1) % len
+                    } else if cur == 0 {
+                        len - 1
+                    } else {
+                        cur - 1
+                    };
+                    let next_pid = self.config.providers[next_p_idx].id.clone();
+                    if let Some(t) = self.config.targets.iter().find(|t| t.provider_id == next_pid) {
+                        self.chat_target_id = t.id.clone();
+                    }
+                }
+            }
+            ChatParamField::EndpointType => {
+                self.config.execution.endpoint_type = if dir >= 0 {
+                    self.config.execution.endpoint_type.next()
+                } else {
+                    self.config.execution.endpoint_type.prev()
+                };
+                self.config_dirty = true;
+            }
+            ChatParamField::Stream => {
+                self.config.execution.stream = !self.config.execution.stream;
+                self.config_dirty = true;
+            }
+            ChatParamField::TimeoutSec => {
+                let next = if dir >= 0 {
+                    self.config.execution.timeout_sec.saturating_add(10)
+                } else {
+                    self.config.execution.timeout_sec.saturating_sub(10)
+                };
+                self.config.execution.timeout_sec = next.clamp(5, 600);
+                self.config_dirty = true;
+            }
+            ChatParamField::Temperature => {
+                let next = ((self.config.execution.temperature + (dir as f32) * 0.05) * 100.0).round() / 100.0;
+                self.config.execution.temperature = next.clamp(0.0, 2.0);
+                self.config_dirty = true;
+            }
+            ChatParamField::TopP => {
+                let next = ((self.config.execution.top_p + (dir as f32) * 0.05) * 100.0).round() / 100.0;
+                self.config.execution.top_p = next.clamp(0.0, 1.0);
+                self.config_dirty = true;
+            }
+            ChatParamField::MaxTokens => {
+                let next = if dir >= 0 {
+                    self.config.execution.max_tokens.saturating_add(128)
+                } else {
+                    self.config.execution.max_tokens.saturating_sub(128)
+                };
+                self.config.execution.max_tokens = next.min(1_000_000);
+                self.config_dirty = true;
+            }
+            ChatParamField::Seed => {
+                let next = match (self.config.execution.seed, dir >= 0) {
+                    (None, true) => Some(42),
+                    (None, false) => None,
+                    (Some(0), false) => None,
+                    (Some(v), true) => Some(v.saturating_add(1)),
+                    (Some(v), false) => Some(v - 1),
+                };
+                self.config.execution.seed = next;
+                self.config_dirty = true;
+            }
+            ChatParamField::SystemPromptEnabled => {
+                self.config.system_prompt.enabled = !self.config.system_prompt.enabled;
+                self.config_dirty = true;
+            }
+            ChatParamField::SystemPersona => {
+                let total = SYSTEM_PERSONAS.len() + 1; // index 0..len-1 + len = None
+                let cur = self
+                    .config
+                    .system_prompt
+                    .persona
+                    .as_deref()
+                    .and_then(|id| SYSTEM_PERSONAS.iter().position(|p| p.id == id))
+                    .unwrap_or(SYSTEM_PERSONAS.len());
+                let next = if dir >= 0 {
+                    (cur + 1) % total
+                } else if cur == 0 {
+                    total - 1
+                } else {
+                    cur - 1
+                };
+                if next < SYSTEM_PERSONAS.len() {
+                    self.config.system_prompt.persona = Some(SYSTEM_PERSONAS[next].id.to_string());
+                    self.config.system_prompt.enabled = true;
+                } else {
+                    self.config.system_prompt.persona = None;
+                }
+                self.config_dirty = true;
+            }
+            ChatParamField::EndpointFilesCount => {
+                if !self.config.endpoint_files.is_empty() {
+                    let any_enabled = self.config.endpoint_files.iter().any(|f| f.enabled);
+                    for f in &mut self.config.endpoint_files {
+                        f.enabled = !any_enabled;
+                    }
+                    self.config_dirty = true;
+                }
+            }
+            ChatParamField::ExecutionMode => {
+                self.config.execution.mode = self.config.execution.mode.toggle();
+                self.config_dirty = true;
+            }
+            ChatParamField::Concurrency => {
+                let next = if dir >= 0 {
+                    self.config.execution.concurrency.saturating_add(1)
+                } else {
+                    self.config.execution.concurrency.saturating_sub(1)
+                };
+                self.config.execution.concurrency = next.clamp(1, 100);
+                self.config_dirty = true;
+            }
+            ChatParamField::RandomizeOrder => {
+                self.config.execution.randomize_order = !self.config.execution.randomize_order;
+                self.config_dirty = true;
+            }
+            _ => {}
+        }
+        self.status_message = format!("{}: {}", field.label(), self.chat_param_display_value(field));
+    }
+
+    fn populate_chat_from_result_opt(&mut self, chosen: Option<&ModelRunResult>) {
+        if let Some(res) = chosen {
+            self.chat_target_id = res.target_id.clone();
+            self.chat_last_result = Some(res.clone());
+        } else {
+            let tid = self
+                .active_chat_target()
+                .map(|t| t.id.clone())
+                .unwrap_or_default();
+            self.chat_target_id = tid.clone();
+            self.chat_last_result = self.results.get(&tid).cloned();
+        }
+
+        self.chat_messages.clear();
+        if !self.prompt.trim().is_empty() {
+            self.chat_messages.push(ChatTurnMessage {
+                role: "user".to_string(),
+                content: self.prompt.clone(),
+            });
+        }
+        if let Some(res) = chosen.or(self.chat_last_result.as_ref()) {
+            let assistant_text = if !res.output.is_empty() {
+                if let Some(ref err) = res.error {
+                    format!("{}\n\n[ERROR: {}]", res.output, err)
+                } else {
+                    res.output.clone()
+                }
+            } else if let Some(ref err) = res.error {
+                if let Some(ref adv) = res.advice {
+                    format!("ERROR: {}\nADVICE: {}", err, adv)
+                } else {
+                    format!("ERROR: {}", err)
+                }
+            } else {
+                String::new()
+            };
+            if !assistant_text.is_empty() {
+                self.chat_messages.push(ChatTurnMessage {
+                    role: "assistant".to_string(),
+                    content: assistant_text,
+                });
+            }
+        }
+
+        self.chat_input.clear();
+        self.chat_scroll = 0;
+        self.chat_editing_param = false;
+        self.chat_editing_composer = false;
+        self.chat_focus = ChatFocus::Params;
+        self.active_tab = ActiveTab::Chat;
+    }
+
+    pub fn open_chat_from_prompt(&mut self) {
+        if let Some(item) = PROMPT_SUITES.get(self.selected_suite_idx) {
+            let matches_any_suite = PROMPT_SUITES.iter().any(|s| s.prompt == self.prompt);
+            if self.prompt.trim().is_empty() || matches_any_suite {
+                self.prompt = item.prompt.to_string();
+                self.run_title = item.title.to_string();
+            }
+        }
+        let target_id = self
+            .active_chat_target()
+            .map(|t| t.id.clone())
+            .unwrap_or_default();
+        let cached = self.results.get(&target_id).cloned();
+        self.populate_chat_from_result_opt(cached.as_ref());
+        self.status_message = format!("Opened 7:Chat from Prompt ({})", self.run_title);
+    }
+
+    pub fn open_chat_from_selected_response(&mut self) {
+        let ordered = self.ordered_results();
+        if ordered.is_empty() {
+            self.populate_chat_from_result_opt(None);
+            self.status_message = "Opened 7:Chat".to_string();
+            return;
+        }
+        let idx = self.selected_result_idx.min(ordered.len() - 1);
+        let chosen = ordered[idx].clone();
+        let model_label = chosen.model_name.clone();
+        self.populate_chat_from_result_opt(Some(&chosen));
+        self.status_message = format!("Opened 7:Chat with response from {}", model_label);
+    }
+
+    pub fn open_chat_from_waterfall(&mut self) {
+        let sorted = self.sorted_waterfall_results();
+        if sorted.is_empty() {
+            self.populate_chat_from_result_opt(None);
+            self.status_message = "Opened 7:Chat".to_string();
+            return;
+        }
+        let idx = self.waterfall_selected_idx.min(sorted.len() - 1);
+        let chosen = sorted[idx].clone();
+        if let Some(pos) = self
+            .ordered_results()
+            .iter()
+            .position(|r| r.target_id == chosen.target_id)
+        {
+            self.selected_result_idx = pos;
+        }
+        let model_label = chosen.model_name.clone();
+        self.populate_chat_from_result_opt(Some(&chosen));
+        self.status_message = format!("Opened 7:Chat from Waterfall ({})", model_label);
+    }
+
+    pub fn send_chat_turn(&mut self) {
+        if self.chat_running || self.is_running {
+            return;
+        }
+        let Some(target) = self.active_chat_target().cloned() else {
+            self.status_message = "No target model configured for 7:Chat.".to_string();
+            return;
+        };
+
+        let draft = self.chat_input.trim().to_string();
+        if !draft.is_empty() {
+            self.chat_messages.push(ChatTurnMessage {
+                role: "user".to_string(),
+                content: draft,
+            });
+            self.chat_input.clear();
+        } else if self.chat_messages.is_empty() && !self.prompt.trim().is_empty() {
+            self.chat_messages.push(ChatTurnMessage {
+                role: "user".to_string(),
+                content: self.prompt.clone(),
+            });
+        } else if self
+            .chat_messages
+            .last()
+            .map(|m| m.role == "assistant")
+            .unwrap_or(false)
+        {
+            if let Some(last) = self.chat_messages.last() {
+                if last.content.starts_with("ERROR:") {
+                    self.chat_messages.pop();
+                } else {
+                    self.status_message =
+                        "Press 'i' to type a follow-up message before sending.".to_string();
+                    return;
+                }
+            }
+        }
+
+        if self.chat_messages.is_empty() && self.config.matching_endpoint_files().is_empty() {
+            self.status_message = "Enter a message or attach an endpoint file before sending.".to_string();
+            return;
+        }
+
+        self.chat_messages.push(ChatTurnMessage {
+            role: "assistant".to_string(),
+            content: "...".to_string(),
+        });
+        self.chat_active_assistant_idx = Some(self.chat_messages.len() - 1);
+        let send_history = self.chat_messages[..self.chat_messages.len() - 1].to_vec();
+
+        let (abort_tx, abort_rx) = watch::channel(false);
+        self.abort_tx = Some(abort_tx);
+        self.chat_running = true;
+        self.chat_editing_composer = false;
+        self.status_message = format!(
+            "Sending chat turn to {} ({})...",
+            target.model,
+            self.config.execution.endpoint_type.label()
+        );
+        spawn_chat_turn(
+            self.config.clone(),
+            target,
+            send_history,
+            self.engine_tx.clone(),
+            abort_rx,
         );
     }
 
@@ -1707,6 +3049,72 @@ impl AppState {
                         }
                     }
                     ActiveTab::CapabilityGraph => {}
+                    ActiveTab::Chat => {
+                        if self.chat_editing_param || self.chat_adding_param {
+                            self.chat_editing_param = false;
+                            self.chat_adding_param = false;
+                            self.chat_param_input.clear();
+                        }
+                        if self.layout_zones.chat_params_area.contains(pos) {
+                            let was_params = self.chat_focus == ChatFocus::Params;
+                            self.chat_focus = ChatFocus::Params;
+                            self.chat_editing_composer = false;
+                            if let Some(idx) = Self::inner_list_row(
+                                self.layout_zones.chat_params_area,
+                                col,
+                                row,
+                                self.layout_zones.chat_params_offset,
+                            ) {
+                                let rows = self.chat_config_rows();
+                                if let Some(&clicked_row) = rows.get(idx) {
+                                    let was_selected =
+                                        was_params && self.chat_selected_param_idx == idx;
+                                    let clicked_checkbox = col
+                                        <= self.layout_zones.chat_params_area.x.saturating_add(7);
+                                    self.chat_selected_param_idx = idx;
+                                    match clicked_row {
+                                        ChatConfigRow::AddParam => {
+                                            self.start_add_chat_param();
+                                        }
+                                        ChatConfigRow::Custom(ci) => {
+                                            if clicked_checkbox {
+                                                self.toggle_chat_row_activation();
+                                            } else if was_selected {
+                                                self.begin_edit_chat_param();
+                                            } else if let Some(p) =
+                                                self.config.execution.extra_params.get(ci)
+                                            {
+                                                self.status_message = format!(
+                                                    "Custom param '{}': Space/[ ] toggle · Enter edit · Del remove",
+                                                    p.key
+                                                );
+                                            }
+                                        }
+                                        ChatConfigRow::Builtin(field) => {
+                                            if clicked_checkbox
+                                                && self.is_chat_field_activated(field).is_some()
+                                            {
+                                                self.toggle_chat_row_activation();
+                                            } else if was_selected {
+                                                self.begin_edit_chat_param();
+                                            } else {
+                                                self.status_message = field.hint().to_string();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else if self.layout_zones.chat_messages_area.contains(pos) {
+                            self.chat_focus = ChatFocus::Messages;
+                            self.chat_editing_composer = false;
+                        } else if self.layout_zones.chat_composer_area.contains(pos) {
+                            self.chat_focus = ChatFocus::Composer;
+                            self.chat_editing_composer = true;
+                            self.status_message =
+                                "Chat composer active (Enter to send, Shift+Enter newline, Esc exit)"
+                                    .to_string();
+                        }
+                    }
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
@@ -1731,6 +3139,16 @@ impl AppState {
                         }
                     }
                     ActiveTab::ConfigEditor => {
+                        if self.layout_zones.config_settings_area.contains(pos) {
+                            if scroll_up {
+                                self.config_settings_scroll =
+                                    self.config_settings_scroll.saturating_sub(2);
+                            } else {
+                                self.config_settings_scroll =
+                                    self.config_settings_scroll.saturating_add(2);
+                            }
+                            return;
+                        }
                         if self.layout_zones.config_providers_area.contains(pos) {
                             self.config_focus = ConfigFocus::Providers;
                         } else if self.layout_zones.config_models_area.contains(pos) {
@@ -1743,6 +3161,21 @@ impl AppState {
                             self.navigate_up();
                         } else {
                             self.navigate_down();
+                        }
+                    }
+                    ActiveTab::Chat => {
+                        if self.layout_zones.chat_params_area.contains(pos) {
+                            let max_idx = self.chat_config_rows().len().saturating_sub(1);
+                            if scroll_up {
+                                self.chat_selected_param_idx =
+                                    self.chat_selected_param_idx.saturating_sub(1);
+                            } else if self.chat_selected_param_idx < max_idx {
+                                self.chat_selected_param_idx += 1;
+                            }
+                        } else if scroll_up {
+                            self.chat_scroll = self.chat_scroll.saturating_sub(3);
+                        } else {
+                            self.chat_scroll = self.chat_scroll.saturating_add(3);
                         }
                     }
                     _ => {
@@ -1792,6 +3225,10 @@ mod tests {
             config_models_offset: 0,
             config_subgroups_area: Rect::new(48, 22, 52, 6),
             config_subgroups_offset: 0,
+            chat_params_area: Rect::new(0, 3, 42, 20),
+            chat_params_offset: 0,
+            chat_messages_area: Rect::new(42, 3, 58, 15),
+            chat_composer_area: Rect::new(42, 18, 58, 5),
         };
         app
     }
@@ -1960,15 +3397,150 @@ mod tests {
         app.waterfall_sort = WaterfallSortField::Speed;
         app.waterfall_desc = true;
         app.waterfall_selected_idx = 0;
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         assert_eq!(app.active_tab, ActiveTab::Responses);
         assert_eq!(app.selected_result_idx, 1);
 
+        // Enter from Waterfall opens 7:Chat with the selected model & its response as msg
         app.active_tab = ActiveTab::Waterfall;
         app.waterfall_selected_idx = 1;
-        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
-        assert_eq!(app.active_tab, ActiveTab::Responses);
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.active_tab, ActiveTab::Chat);
         assert_eq!(app.selected_result_idx, 0);
+        assert_eq!(app.chat_target_id, app.config.targets[0].id);
+        assert!(app
+            .chat_messages
+            .iter()
+            .any(|m| m.role == "assistant" && m.content.contains("First output")));
+    }
+
+    #[test]
+    fn shift_up_and_down_scroll_responses_canvas() {
+        let mut app = test_app();
+        app.active_tab = ActiveTab::Responses;
+        app.selected_result_idx = 1;
+        app.output_scroll = 0;
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        assert_eq!(app.output_scroll, 6);
+        assert_eq!(app.selected_result_idx, 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        assert_eq!(app.output_scroll, 3);
+        assert_eq!(app.selected_result_idx, 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        assert_eq!(app.output_scroll, 0);
+    }
+
+    #[test]
+    fn enter_from_prompt_and_responses_opens_chat_with_scrollable_editable_config() {
+        let mut app = test_app();
+
+        // Enter from 1:Prompt opens 7:Chat with the active prompt as user msg
+        app.active_tab = ActiveTab::PromptSuites;
+        app.selected_suite_idx = 1;
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.active_tab, ActiveTab::Chat);
+        assert_eq!(app.chat_messages.len(), 1);
+        assert_eq!(app.chat_messages[0].role, "user");
+        assert_eq!(app.chat_messages[0].content, PROMPT_SUITES[1].prompt);
+
+        // Scroll down & up across all 23 editable send parameters
+        assert_eq!(app.chat_selected_param_idx, 0);
+        for _ in 0..30 {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert_eq!(app.chat_selected_param_idx, CHAT_PARAM_FIELDS.len() - 1);
+
+        for _ in 0..12 {
+            app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        }
+        let temp_idx = CHAT_PARAM_FIELDS
+            .iter()
+            .position(|f| *f == ChatParamField::Temperature)
+            .unwrap();
+        app.chat_selected_param_idx = temp_idx;
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.chat_editing_param);
+        app.chat_param_input = "0.42".to_string();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.chat_editing_param);
+        assert!((app.config.execution.temperature - 0.42).abs() < 0.001);
+
+        // Enter from 2:Responses opens 7:Chat with that target & response as assistant msg
+        app.results.insert(
+            app.config.targets[1].id.clone(),
+            ModelRunResult {
+                target_id: app.config.targets[1].id.clone(),
+                model_name: app.config.targets[1].model.clone(),
+                provider_name: "Ollama".into(),
+                status: RunStatus::Completed,
+                output: "Response msg content".into(),
+                prompt_tokens: 4,
+                completion_tokens: 6,
+                total_tokens: 10,
+                tokens_per_sec: 45.0,
+                timing: Default::default(),
+                http_status: Some(200),
+                error: None,
+                advice: None,
+            },
+        );
+        app.active_tab = ActiveTab::Responses;
+        app.selected_result_idx = 1;
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.active_tab, ActiveTab::Chat);
+        assert_eq!(app.chat_target_id, app.config.targets[1].id);
+        assert_eq!(app.chat_messages.len(), 2);
+        assert_eq!(app.chat_messages[1].role, "assistant");
+        assert_eq!(app.chat_messages[1].content, "Response msg content");
+
+        // Scroll chat messages up & down
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        assert_eq!(app.chat_scroll, 3);
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        assert_eq!(app.chat_scroll, 0);
+    }
+
+    #[test]
+    fn chat_param_activation_checkboxes_and_add_param_work() {
+        let mut app = test_app();
+        app.active_tab = ActiveTab::Chat;
+        app.chat_focus = ChatFocus::Params;
+
+        // Toggle activation checkbox on Temperature via Space
+        let temp_idx = CHAT_PARAM_FIELDS
+            .iter()
+            .position(|f| *f == ChatParamField::Temperature)
+            .unwrap();
+        app.chat_selected_param_idx = temp_idx;
+        assert!(app.config.execution.active_params.temperature);
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(!app.config.execution.active_params.temperature);
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(app.config.execution.active_params.temperature);
+
+        // Press 'a' to trigger + Add Param and commit key=value
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(app.chat_adding_param);
+        for ch in "presence_penalty=0.25".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.chat_adding_param);
+        assert_eq!(app.config.execution.extra_params.len(), 1);
+        assert_eq!(app.config.execution.extra_params[0].key, "presence_penalty");
+        assert_eq!(app.config.execution.extra_params[0].value, "0.25");
+        assert!(app.config.execution.extra_params[0].enabled);
+
+        // Toggle custom param checkbox with Space, then delete with Delete
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(!app.config.execution.extra_params[0].enabled);
+        app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert!(app.config.execution.extra_params.is_empty());
     }
 }
 

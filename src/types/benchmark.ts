@@ -1,6 +1,13 @@
 export type ThemeId = 'light' | 'dark' | 'sepia-light' | 'sepia-dark' | 'greenish-sepia';
 
-export type WorkspaceView = 'cards' | 'waterfall' | 'compare' | 'graph';
+export type WorkspaceView = 'cards' | 'waterfall' | 'compare' | 'graph' | 'chat';
+
+export interface ChatTurnMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: number;
+}
 
 export type ProviderKind =
   | 'gemini-builtin'
@@ -67,6 +74,25 @@ export interface EndpointFileAttachment {
   addedAt: number;
 }
 
+export interface CustomSendParam {
+  id: string;
+  key: string;
+  value: string;
+  enabled: boolean;
+}
+
+export interface SendParamActivation {
+  customHeaders?: boolean;
+  customEndpoint?: boolean;
+  stream?: boolean;
+  temperature?: boolean;
+  topP?: boolean;
+  maxTokens?: boolean;
+  seed?: boolean;
+  ttsVoice?: boolean;
+  endpointFiles?: boolean;
+}
+
 export interface ExecutionConfig {
   mode: 'parallel' | 'sequential';
   concurrency: number;
@@ -81,6 +107,8 @@ export interface ExecutionConfig {
   customEndpoint?: string;
   customPayloadMode?: EndpointPayloadMode;
   ttsVoice?: string;
+  activeParams?: SendParamActivation;
+  extraParams?: CustomSendParam[];
 }
 
 export type RunStatus = 'idle' | 'queued' | 'connecting' | 'streaming' | 'completed' | 'error' | 'aborted';

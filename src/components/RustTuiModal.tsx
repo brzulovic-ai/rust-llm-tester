@@ -28,7 +28,7 @@ interface RustTuiModalProps {
   prompt: string;
 }
 
-type TuiSimTab = '1:Prompt' | '2:Responses' | '3:Waterfall' | '6:Config';
+type TuiSimTab = '1:Prompt' | '2:Responses' | '3:Waterfall' | '6:Config' | '7:Chat';
 
 export const RustTuiModal: React.FC<RustTuiModalProps> = ({
   open,
@@ -213,7 +213,7 @@ export const RustTuiModal: React.FC<RustTuiModalProps> = ({
                 style={{ borderColor: 'var(--border-subtle)' }}
               >
                 <div className="flex flex-wrap gap-2">
-                  {(['1:Prompt', '2:Responses', '3:Waterfall', '6:Config'] as TuiSimTab[]).map(
+                  {(['1:Prompt', '2:Responses', '3:Waterfall', '6:Config', '7:Chat'] as TuiSimTab[]).map(
                     (tab) => (
                       <button
                         key={tab}
@@ -325,6 +325,36 @@ export const RustTuiModal: React.FC<RustTuiModalProps> = ({
                     </div>
                   ))
                 )}
+
+                {simTab === '7:Chat' && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-0.5 border-r pr-2" style={{ borderColor: 'var(--border-subtle)' }}>
+                      <div style={{ color: 'var(--accent-primary)' }}>
+                        Editable Send Config (↑/↓ Scroll all 23):
+                      </div>
+                      <div>01. Target Model: {targets[0]?.modelName ?? '<none>'}</div>
+                      <div>07. Endpoint Type: {executionConfig.endpointType ?? 'chat-completions'}</div>
+                      <div>09. SSE Stream: {String(executionConfig.stream)}</div>
+                      <div>10. Timeout: {executionConfig.timeoutSec}s</div>
+                      <div>11. Temperature: {executionConfig.temperature.toFixed(2)}</div>
+                      <div>12. Top P: {(executionConfig.topP ?? 1).toFixed(2)}</div>
+                      <div>13. Max Tokens: {executionConfig.maxTokens}</div>
+                      <div>16. System Layer On: {String(systemPrompt.enabled)}</div>
+                    </div>
+                    <div className="space-y-1">
+                      <div style={{ color: 'var(--accent-primary)' }}>[USER]</div>
+                      <div className="line-clamp-2" style={{ color: 'var(--text-secondary)' }}>
+                        {prompt || 'No prompt loaded'}
+                      </div>
+                      <div style={{ color: 'var(--accent-primary)' }}>
+                        [ASSISTANT · {results[0]?.modelName ?? targets[0]?.modelName ?? 'model'}]
+                      </div>
+                      <div className="line-clamp-4" style={{ color: 'var(--text-secondary)' }}>
+                        {results[0]?.output || results[0]?.error || 'Press Enter from Prompt, Responses, or Waterfall to open response here.'}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* TUI Status Footer */}
@@ -332,7 +362,7 @@ export const RustTuiModal: React.FC<RustTuiModalProps> = ({
                 className="pt-2 border-t text-[10px]"
                 style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-muted)' }}
               >
-                [READY] 1-6 Tabs · r Run · R Retry · s Save TOML · t Theme · e Export · q Quit
+                [READY] 1-7 Tabs · Enter 7:Chat · r Run · R Retry · s Save TOML · t Theme · e Export · q Quit
               </div>
             </div>
 

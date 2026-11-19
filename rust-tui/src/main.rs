@@ -172,6 +172,7 @@ async fn handle_subcommand(cmd: Commands, explicit_cfg: Option<&std::path::Path>
                     EngineEvent::Update(res) => {
                         map.insert(res.target_id.clone(), res);
                     }
+                    EngineEvent::ChatUpdate(_) | EngineEvent::ChatFinished => {}
                     EngineEvent::ModelsRefreshed { .. } => {}
                     EngineEvent::BatchFinished => break,
                 }

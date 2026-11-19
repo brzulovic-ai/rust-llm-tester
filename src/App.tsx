@@ -13,6 +13,7 @@ import {
   X,
 } from 'lucide-react';
 import { CapabilityGraphView } from './components/CapabilityGraphView';
+import { ChatView } from './components/ChatView';
 import { DiffCompareView } from './components/DiffCompareView';
 import { ResultCard } from './components/ResultCard';
 import { RustTuiModal } from './components/RustTuiModal';
@@ -21,6 +22,7 @@ import { WaterfallView } from './components/WaterfallView';
 import { PROMPT_SUITES } from './data/promptSuites';
 import type {
   BenchmarkRunRecord,
+  ChatTurnMessage,
   EndpointFileAttachment,
   ExecutionConfig,
   ModelRunResult,
@@ -128,9 +130,17 @@ export default function App() {
   } | null>(null);
   const [cardLayout, setCardLayout] = useState<'grid' | 'split'>('grid');
   const [rustTuiOpen, setRustTuiOpen] = useState<boolean>(false);
+  const [selectedResultTargetId, setSelectedResultTargetId] = useState<string | null>(null);
+  const [chatTargetId, setChatTargetId] = useState<string>(() => targets[0]?.id ?? '');
+  const [chatMessages, setChatMessages] = useState<ChatTurnMessage[]>([]);
+  const [chatInput, setChatInput] = useState<string>('');
+  const [chatRunning, setChatRunning] = useState<boolean>(false);
+  const [chatLastResult, setChatLastResult] = useState<ModelRunResult | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const chatAbortControllerRef = useRef<AbortController | null>(null);
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
+  const canvasScrollRef = useRef<HTMLDivElement | null>(null);
   const isResizingRef = useRef<boolean>(false);
 
   // Sync theme to documentElement
@@ -206,6 +216,30 @@ export default function App() {
     };
   }, []);
 
+  // Shift+ArrowUp / Shift+ArrowDown scrolls the Responses canvas
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (activeView !== 'cards' || !e.shiftKey) return;
+      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+      const targetEl = e.target as HTMLElement | null;
+      const tag = targetEl?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || targetEl?.isContentEditable) {
+        return;
+      }
+      const container = canvasScrollRef.current;
+      if (!container) return;
+      e.preventDefault();
+      const delta = e.key === 'ArrowDown' ? 180 : -180;
+      if (typeof container.scrollBy === 'function') {
+        container.scrollBy({ top: delta, behavior: 'auto' });
+      } else {
+        container.scrollTop = Math.max(0, container.scrollTop + delta);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [activeView]);
+
   const enabledTargets = useMemo(() => targets.filter((t) => t.enabled), [targets]);
   const activeEndpointType = executionConfig.endpointType ?? 'chat-completions';
   const activeEndpointPreset = getEndpointPreset(activeEndpointType);
@@ -249,6 +283,125 @@ export default function App() {
     }
     return list;
   }, [enabledTargets, resultsMap]);
+
+  const openChatWithResult = useCallback(
+    (chosenResult?: ModelRunResult, promptOverride?: string, titleOverride?: string) => {
+      const activePrompt = promptOverride ?? prompt;
+      if (promptOverride !== undefined) {
+        setPrompt(promptOverride);
+      }
+      if (titleOverride !== undefined) {
+        setRunTitle(titleOverride);
+      }
+
+      const fallbackResult =
+        orderedResults.find((r) => r.targetId === selectedResultTargetId) ?? orderedResults[0];
+      const chosen = chosenResult ?? fallbackResult;
+
+      const resolvedTargetId =
+        chosen?.targetId ||
+        (targets.some((t) => t.id === chatTargetId) ? chatTargetId : '') ||
+        enabledTargets[0]?.id ||
+        targets[0]?.id ||
+        '';
+
+      if (resolvedTargetId) {
+        setChatTargetId(resolvedTargetId);
+        setSelectedResultTargetId(resolvedTargetId);
+      }
+      setChatLastResult(chosen ?? null);
+
+      const initialMessages: ChatTurnMessage[] = [];
+      const now = Date.now();
+      if (activePrompt.trim()) {
+        initialMessages.push({
+          id: `chat-u-${now}`,
+          role: 'user',
+          content: activePrompt,
+          timestamp: now,
+        });
+      }
+
+      if (chosen) {
+        let assistantContent = '';
+        if (chosen.output.trim()) {
+          assistantContent = chosen.error
+            ? `${chosen.output}\n\n[ERROR: ${chosen.error}]`
+            : chosen.output;
+        } else if (chosen.error) {
+          assistantContent = chosen.advice
+            ? `ERROR: ${chosen.error}\nADVICE: ${chosen.advice}`
+            : `ERROR: ${chosen.error}`;
+        }
+        if (assistantContent) {
+          initialMessages.push({
+            id: `chat-a-${now + 1}`,
+            role: 'assistant',
+            content: assistantContent,
+            timestamp: now + 1,
+          });
+        }
+      }
+
+      setChatMessages(initialMessages);
+      setChatInput('');
+      setActiveView('chat');
+      setMobileSidebarOpen(false);
+    },
+    [
+      prompt,
+      orderedResults,
+      selectedResultTargetId,
+      targets,
+      chatTargetId,
+      enabledTargets,
+    ]
+  );
+
+  const openChatFromPrompt = useCallback(
+    (promptOverride?: string, titleOverride?: string) => {
+      const activeId =
+        selectedResultTargetId ||
+        (targets.some((t) => t.id === chatTargetId) ? chatTargetId : '') ||
+        enabledTargets[0]?.id ||
+        targets[0]?.id ||
+        '';
+      const cached = orderedResults.find((r) => r.targetId === activeId) ?? orderedResults[0];
+      const meaningfulCached =
+        cached && (cached.output.trim().length > 0 || Boolean(cached.error)) ? cached : undefined;
+      openChatWithResult(meaningfulCached, promptOverride, titleOverride);
+    },
+    [selectedResultTargetId, targets, chatTargetId, enabledTargets, orderedResults, openChatWithResult]
+  );
+
+  // Keyboard shortcuts: Enter from Responses/Waterfall opens 7:Chat, '7' opens 7:Chat
+  useEffect(() => {
+    const onGlobalKeyDown = (e: KeyboardEvent) => {
+      const targetEl = e.target as HTMLElement | null;
+      const tag = targetEl?.tagName;
+      if (
+        tag === 'INPUT' ||
+        tag === 'TEXTAREA' ||
+        tag === 'SELECT' ||
+        targetEl?.isContentEditable
+      ) {
+        return;
+      }
+
+      if (e.key === '7' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        setActiveView('chat');
+        return;
+      }
+
+      if (e.key === 'Enter' && (activeView === 'cards' || activeView === 'waterfall')) {
+        if (tag === 'BUTTON' || tag === 'A') return;
+        e.preventDefault();
+        openChatWithResult();
+      }
+    };
+    window.addEventListener('keydown', onGlobalKeyDown);
+    return () => window.removeEventListener('keydown', onGlobalKeyDown);
+  }, [activeView, openChatWithResult]);
 
   const persistCompletedRun = useCallback(
     async (finalResults: ModelRunResult[]) => {
@@ -357,6 +510,119 @@ export default function App() {
 
     setIsRunning(false);
     abortControllerRef.current = null;
+  };
+
+  const handleSendChatTurn = async () => {
+    if (chatRunning || isRunning) return;
+    const activeTarget =
+      targets.find((t) => t.id === chatTargetId) ?? enabledTargets[0] ?? targets[0];
+    if (!activeTarget) return;
+    const provider = providers.find((p) => p.id === activeTarget.providerId) ?? providers[0];
+    if (!provider) return;
+
+    const draft = chatInput.trim();
+    const baseHistory: ChatTurnMessage[] = [...chatMessages];
+    const now = Date.now();
+
+    if (draft) {
+      baseHistory.push({
+        id: `chat-u-${now}`,
+        role: 'user',
+        content: draft,
+        timestamp: now,
+      });
+      setChatInput('');
+    } else if (baseHistory.length === 0 && prompt.trim()) {
+      baseHistory.push({
+        id: `chat-u-${now}`,
+        role: 'user',
+        content: prompt,
+        timestamp: now,
+      });
+    } else if (baseHistory[baseHistory.length - 1]?.role === 'assistant') {
+      baseHistory.pop();
+    }
+
+    if (baseHistory.length === 0 && matchingEndpointFiles.length === 0) return;
+
+    const assistantId = `chat-a-${Date.now()}`;
+    const historyForRequest = baseHistory.map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+    const lastUserContent =
+      [...historyForRequest].reverse().find((m) => m.role === 'user')?.content ?? prompt;
+
+    setChatMessages([
+      ...baseHistory,
+      {
+        id: assistantId,
+        role: 'assistant',
+        content: '...',
+        timestamp: Date.now(),
+      },
+    ]);
+    setChatRunning(true);
+
+    const controller = new AbortController();
+    chatAbortControllerRef.current = controller;
+
+    const applyChatResultUpdate = (partial: ModelRunResult) => {
+      setChatLastResult(partial);
+      setResultsMap((prev) => ({ ...prev, [activeTarget.id]: partial }));
+      const nextText = partial.output.trim()
+        ? partial.error
+          ? `${partial.output}\n\n[ERROR: ${partial.error}]`
+          : partial.output
+        : partial.error
+        ? partial.advice
+          ? `ERROR: ${partial.error}\nADVICE: ${partial.advice}`
+          : `ERROR: ${partial.error}`
+        : '...';
+      setChatMessages((prev) =>
+        prev.map((m) => (m.id === assistantId ? { ...m, content: nextText } : m))
+      );
+    };
+
+    const finalRes = await executeSingleTarget({
+      target: activeTarget,
+      provider,
+      prompt: lastUserContent,
+      historyMessages: historyForRequest,
+      systemPrompt,
+      executionConfig,
+      endpointFiles,
+      enqueuedAt: performance.now(),
+      signal: controller.signal,
+      onUpdate: applyChatResultUpdate,
+    });
+
+    applyChatResultUpdate(finalRes);
+    setChatRunning(false);
+    chatAbortControllerRef.current = null;
+  };
+
+  const handleAbortChat = () => {
+    chatAbortControllerRef.current?.abort('cancelled');
+    setChatRunning(false);
+  };
+
+  const handleResetChat = () => {
+    if (chatRunning) return;
+    setChatMessages(
+      prompt.trim()
+        ? [
+            {
+              id: `chat-u-reset-${Date.now()}`,
+              role: 'user',
+              content: prompt,
+              timestamp: Date.now(),
+            },
+          ]
+        : []
+    );
+    setChatLastResult(null);
+    setChatInput('');
   };
 
   const handleExportJson = () => {
@@ -535,6 +801,7 @@ export default function App() {
               { id: 'waterfall', label: 'Waterfall' },
               { id: 'compare', label: 'Diff Compare' },
               { id: 'graph', label: 'Capability Graph' },
+              { id: 'chat', label: 'Chat' },
             ] as Array<{ id: WorkspaceView; label: string }>
           ).map((nav) => {
             const active = activeView === nav.id;
@@ -600,6 +867,7 @@ export default function App() {
               setSuiteName(sLabel);
               setMobileSidebarOpen(false);
             }}
+            onOpenChatFromPrompt={openChatFromPrompt}
             systemPrompt={systemPrompt}
             onSystemPromptChange={setSystemPrompt}
             executionConfig={executionConfig}
@@ -708,6 +976,7 @@ export default function App() {
                 <option value="waterfall">Waterfall</option>
                 <option value="compare">Diff Compare</option>
                 <option value="graph">Capability Graph</option>
+                <option value="chat">Chat</option>
               </select>
 
               {activeView === 'cards' && (
@@ -913,7 +1182,11 @@ export default function App() {
           </div>
 
           {/* Active View Canvas */}
-          <div className="flex-1 overflow-y-auto p-5">
+          <div
+            ref={canvasScrollRef}
+            data-testid="responses-canvas"
+            className="flex-1 overflow-y-auto p-5"
+          >
             {importFeedback && (
               <div
                 role="status"
@@ -962,22 +1235,69 @@ export default function App() {
                       : 'grid grid-cols-1 lg:grid-cols-2 2xl:grid-cols-3 gap-4'
                   }
                 >
-                  {orderedResults.map((result) => (
-                    <ResultCard
-                      key={result.targetId}
-                      result={result}
-                      onRetry={handleRetrySingle}
-                    />
-                  ))}
+                  {orderedResults.map((result, idx) => {
+                    const effectiveSelected =
+                      selectedResultTargetId ?? orderedResults[0]?.targetId ?? null;
+                    return (
+                      <ResultCard
+                        key={result.targetId}
+                        result={result}
+                        onRetry={handleRetrySingle}
+                        isSelected={
+                          effectiveSelected === result.targetId ||
+                          (effectiveSelected === null && idx === 0)
+                        }
+                        onSelect={(tid) => setSelectedResultTargetId(tid)}
+                        onOpenChat={(res) => openChatWithResult(res)}
+                      />
+                    );
+                  })}
                 </div>
               )
             )}
 
-            {activeView === 'waterfall' && <WaterfallView results={orderedResults} />}
+            {activeView === 'waterfall' && (
+              <WaterfallView
+                results={orderedResults}
+                selectedTargetId={selectedResultTargetId}
+                onSelectResult={(tid) => setSelectedResultTargetId(tid)}
+                onOpenChat={(res) => openChatWithResult(res)}
+              />
+            )}
 
             {activeView === 'compare' && <DiffCompareView results={orderedResults} />}
 
             {activeView === 'graph' && <CapabilityGraphView results={orderedResults} />}
+
+            {activeView === 'chat' && (
+              <ChatView
+                targets={targets}
+                onTargetsChange={setTargets}
+                providers={providers}
+                onProvidersChange={setProviders}
+                executionConfig={executionConfig}
+                onExecutionConfigChange={setExecutionConfig}
+                systemPrompt={systemPrompt}
+                onSystemPromptChange={setSystemPrompt}
+                endpointFiles={endpointFiles}
+                onEndpointFilesChange={setEndpointFiles}
+                activeTargetId={chatTargetId}
+                onActiveTargetIdChange={(id) => {
+                  setChatTargetId(id);
+                  setSelectedResultTargetId(id);
+                }}
+                messages={chatMessages}
+                chatInput={chatInput}
+                onChatInputChange={setChatInput}
+                isRunning={chatRunning}
+                lastResult={chatLastResult}
+                onSendTurn={() => {
+                  void handleSendChatTurn();
+                }}
+                onAbort={handleAbortChat}
+                onResetChat={handleResetChat}
+              />
+            )}
           </div>
         </main>
       </div>

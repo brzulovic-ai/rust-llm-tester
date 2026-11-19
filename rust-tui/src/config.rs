@@ -56,6 +56,15 @@ pub enum ExecutionMode {
     Sequential,
 }
 
+impl ExecutionMode {
+    pub fn toggle(self) -> Self {
+        match self {
+            ExecutionMode::Parallel => ExecutionMode::Sequential,
+            ExecutionMode::Sequential => ExecutionMode::Parallel,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EndpointType {
@@ -84,6 +93,18 @@ impl EndpointType {
             EndpointType::Embeddings => EndpointType::Responses,
             EndpointType::Responses => EndpointType::Custom,
             EndpointType::Custom => EndpointType::ChatCompletions,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            EndpointType::ChatCompletions => EndpointType::Custom,
+            EndpointType::AudioTranscriptions => EndpointType::ChatCompletions,
+            EndpointType::AudioTranslations => EndpointType::AudioTranscriptions,
+            EndpointType::AudioSpeech => EndpointType::AudioTranslations,
+            EndpointType::Embeddings => EndpointType::AudioSpeech,
+            EndpointType::Responses => EndpointType::Embeddings,
+            EndpointType::Custom => EndpointType::Responses,
         }
     }
 
@@ -124,6 +145,54 @@ impl EndpointType {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CustomSendParam {
+    pub key: String,
+    pub value: String,
+    pub enabled: bool,
+}
+
+impl Default for CustomSendParam {
+    fn default() -> Self {
+        Self {
+            key: String::new(),
+            value: String::new(),
+            enabled: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SendParamActivation {
+    pub custom_headers: bool,
+    pub custom_endpoint: bool,
+    pub stream: bool,
+    pub temperature: bool,
+    pub top_p: bool,
+    pub max_tokens: bool,
+    pub seed: bool,
+    pub tts_voice: bool,
+    pub endpoint_files: bool,
+}
+
+impl Default for SendParamActivation {
+    fn default() -> Self {
+        Self {
+            custom_headers: true,
+            custom_endpoint: true,
+            stream: true,
+            temperature: true,
+            top_p: true,
+            max_tokens: true,
+            seed: true,
+            tts_voice: true,
+            endpoint_files: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ExecutionConfig {
@@ -139,6 +208,8 @@ pub struct ExecutionConfig {
     pub endpoint_type: EndpointType,
     pub custom_endpoint: String,
     pub tts_voice: String,
+    pub active_params: SendParamActivation,
+    pub extra_params: Vec<CustomSendParam>,
 }
 
 impl Default for ExecutionConfig {
@@ -156,6 +227,8 @@ impl Default for ExecutionConfig {
             endpoint_type: EndpointType::ChatCompletions,
             custom_endpoint: String::new(),
             tts_voice: "alloy".to_string(),
+            active_params: SendParamActivation::default(),
+            extra_params: Vec::new(),
         }
     }
 }
@@ -663,6 +736,10 @@ impl BenchConfig {
         self.providers.iter().find(|p| p.id == id)
     }
 
+    pub fn find_provider_mut(&mut self, id: &str) -> Option<&mut ProviderConfig> {
+        self.providers.iter_mut().find(|p| p.id == id)
+    }
+
     pub fn enabled_targets(&self) -> Vec<&TargetConfig> {
         self.targets.iter().filter(|t| t.enabled).collect()
     }
@@ -1088,5 +1165,28 @@ mod tests {
         assert_eq!(decoded.execution.endpoint_type, EndpointType::AudioTranscriptions);
         assert_eq!(decoded.endpoint_files.len(), 1);
         assert!(!decoded.execution.randomize_order);
+    }
+
+    #[test]
+    fn supports_active_params_and_extra_params_roundtrip() {
+        let mut cfg = BenchConfig::default();
+        assert!(cfg.execution.active_params.temperature);
+        cfg.execution.active_params.temperature = false;
+        cfg.execution.active_params.seed = false;
+        cfg.execution.extra_params.push(CustomSendParam {
+            key: "presence_penalty".to_string(),
+            value: "0.25".to_string(),
+            enabled: true,
+        });
+
+        let toml_str = toml::to_string_pretty(&cfg).expect("serialize");
+        let decoded: BenchConfig = toml::from_str(&toml_str).expect("deserialize");
+        assert!(!decoded.execution.active_params.temperature);
+        assert!(!decoded.execution.active_params.seed);
+        assert!(decoded.execution.active_params.top_p);
+        assert_eq!(decoded.execution.extra_params.len(), 1);
+        assert_eq!(decoded.execution.extra_params[0].key, "presence_penalty");
+        assert_eq!(decoded.execution.extra_params[0].value, "0.25");
+        assert!(decoded.execution.extra_params[0].enabled);
     }
 }

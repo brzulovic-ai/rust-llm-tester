@@ -1,10 +1,13 @@
 import React, { useMemo, useState } from 'react';
-import { ArrowUpDown } from 'lucide-react';
+import { ArrowUpDown, MessageSquare } from 'lucide-react';
 import type { ModelRunResult } from '../types/benchmark';
 import { classifyResultStatus, formatMs, type StatusCategory } from '../utils/metrics';
 
 interface WaterfallViewProps {
   results: ModelRunResult[];
+  selectedTargetId?: string | null;
+  onSelectResult?: (targetId: string) => void;
+  onOpenChat?: (result: ModelRunResult) => void;
 }
 
 type SortField = 'totalMs' | 'ttfbMs' | 'tokensPerSec' | 'modelName' | 'errorCode';
@@ -51,11 +54,18 @@ function getCategoryStyle(category: StatusCategory): React.CSSProperties {
   }
 }
 
-export const WaterfallView: React.FC<WaterfallViewProps> = ({ results }) => {
+export const WaterfallView: React.FC<WaterfallViewProps> = ({
+  results,
+  selectedTargetId,
+  onSelectResult,
+  onOpenChat,
+}) => {
   const [sortField, setSortField] = useState<SortField>('totalMs');
   const [sortAsc, setSortAsc] = useState<boolean>(true);
   const [statusFilter, setStatusFilter] = useState<WaterfallFilter>('all');
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [localSelectedId, setLocalSelectedId] = useState<string | null>(null);
+  const activeSelectedId = selectedTargetId ?? localSelectedId;
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -298,8 +308,9 @@ export const WaterfallView: React.FC<WaterfallViewProps> = ({ results }) => {
               const waitPct = (waitMs / maxTotalMs) * 100;
               const downloadPct = (r.timing.downloadMs / maxTotalMs) * 100;
               const statusInfo = classifyResultStatus(r);
+              const isRowSelected = activeSelectedId === r.targetId;
               const rowHighlightBg =
-                hoveredId === r.targetId
+                isRowSelected || hoveredId === r.targetId
                   ? 'var(--bg-elevated)'
                   : statusInfo.category === 'rate-limit'
                   ? 'rgba(245, 158, 11, 0.06)'
@@ -310,20 +321,72 @@ export const WaterfallView: React.FC<WaterfallViewProps> = ({ results }) => {
               return (
                 <tr
                   key={r.targetId}
+                  tabIndex={0}
+                  aria-selected={isRowSelected}
                   onMouseEnter={() => setHoveredId(r.targetId)}
                   onMouseLeave={() => setHoveredId(null)}
-                  className="border-b last:border-b-0 transition-colors"
+                  onClick={() => {
+                    setLocalSelectedId(r.targetId);
+                    onSelectResult?.(r.targetId);
+                  }}
+                  onDoubleClick={() => onOpenChat?.(r)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && onOpenChat) {
+                      e.preventDefault();
+                      setLocalSelectedId(r.targetId);
+                      onSelectResult?.(r.targetId);
+                      onOpenChat(r);
+                    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                      e.preventDefault();
+                      const curIdx = sorted.findIndex((item) => item.targetId === r.targetId);
+                      const nextIdx =
+                        e.key === 'ArrowDown'
+                          ? Math.min(curIdx + 1, sorted.length - 1)
+                          : Math.max(curIdx - 1, 0);
+                      const nextItem = sorted[nextIdx];
+                      if (nextItem) {
+                        setLocalSelectedId(nextItem.targetId);
+                        onSelectResult?.(nextItem.targetId);
+                      }
+                    }
+                  }}
+                  className="border-b last:border-b-0 transition-colors cursor-pointer focus:outline-none"
                   style={{
-                    borderColor: 'var(--border-subtle)',
+                    borderColor: isRowSelected ? 'var(--accent-primary)' : 'var(--border-subtle)',
                     backgroundColor: rowHighlightBg,
                   }}
                 >
                   <td className="px-4 py-2.5">
-                    <div className="font-medium" style={{ color: 'var(--text-primary)' }}>
-                      {r.modelName}
-                    </div>
-                    <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                      {r.providerName} · {r.status}
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <div className="font-medium" style={{ color: 'var(--text-primary)' }}>
+                          {r.modelName}
+                        </div>
+                        <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                          {r.providerName} · {r.status}
+                        </div>
+                      </div>
+                      {onOpenChat && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setLocalSelectedId(r.targetId);
+                            onSelectResult?.(r.targetId);
+                            onOpenChat(r);
+                          }}
+                          title="Open row in Chat (Enter)"
+                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-medium cursor-pointer shrink-0"
+                          style={{
+                            borderColor: 'var(--border-subtle)',
+                            backgroundColor: 'var(--bg-surface)',
+                            color: 'var(--accent-primary)',
+                          }}
+                        >
+                          <MessageSquare className="w-3 h-3" />
+                          <span>Chat</span>
+                        </button>
+                      )}
                     </div>
                   </td>
                   <td className="px-3 py-2.5" title={r.error || r.advice || statusInfo.badgeText}>

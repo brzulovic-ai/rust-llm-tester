@@ -913,4 +913,204 @@ describe('Extended Coverage Suite (50+ Target)', () => {
     expect(payloads).toHaveLength(3);
     expect(payloads[2]).not.toHaveProperty('temperature');
   });
+
+  it('scrolls the Responses canvas on Shift+ArrowDown and Shift+ArrowUp without hijacking textareas', () => {
+    render(<App />);
+    const canvas = screen.getByTestId('responses-canvas');
+    const scrollByMock = vi.fn(({ top = 0 }: { top?: number }) => {
+      canvas.scrollTop = Math.max(0, canvas.scrollTop + top);
+    });
+    canvas.scrollBy = scrollByMock as typeof canvas.scrollBy;
+
+    fireEvent.keyDown(window, { key: 'ArrowDown', shiftKey: true });
+    expect(scrollByMock).toHaveBeenCalledWith({ top: 180, behavior: 'auto' });
+    expect(canvas.scrollTop).toBe(180);
+
+    fireEvent.keyDown(window, { key: 'ArrowUp', shiftKey: true });
+    expect(scrollByMock).toHaveBeenCalledWith({ top: -180, behavior: 'auto' });
+    expect(canvas.scrollTop).toBe(0);
+
+    const promptInput = screen.getByPlaceholderText(/Enter a prompt or pick a benchmark/i);
+    fireEvent.keyDown(promptInput, { key: 'ArrowDown', shiftKey: true });
+    expect(scrollByMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('opens Chat via Enter from Prompt with scrollable editable Send Config, activation checkboxes, and + Add Param', () => {
+    render(<App />);
+    // In TypeScript web app, the tab is named "Chat" (not "7:Chat")
+    expect(screen.getAllByRole('button', { name: 'Chat' }).length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByRole('button', { name: '7:Chat' })).not.toBeInTheDocument();
+
+    const promptInput = screen.getByPlaceholderText(/Enter a prompt or pick a benchmark/i);
+    fireEvent.change(promptInput, { target: { value: 'Explain Raft consensus briefly.' } });
+
+    // Shift+Enter keeps normal textarea editing
+    fireEvent.keyDown(promptInput, { key: 'Enter', shiftKey: true });
+    expect(screen.queryByTestId('chat-view')).not.toBeInTheDocument();
+
+    // Plain Enter opens Chat with loaded prompt
+    fireEvent.keyDown(promptInput, { key: 'Enter' });
+    expect(screen.getByTestId('chat-view')).toBeInTheDocument();
+    expect(screen.getByText('Chat · Editable Send Config')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-transcript')).toHaveTextContent('Explain Raft consensus briefly.');
+
+    // Scrollable Send Config exposes all editable fields and scrolls up/down
+    const configPanel = screen.getByTestId('chat-config-panel');
+    const scrollByMock = vi.fn(({ top = 0 }: { top?: number }) => {
+      configPanel.scrollTop = Math.max(0, configPanel.scrollTop + top);
+    });
+    configPanel.scrollBy = scrollByMock as typeof configPanel.scrollBy;
+
+    fireEvent.click(screen.getByLabelText('Scroll send config down'));
+    expect(configPanel.scrollTop).toBe(180);
+    fireEvent.click(screen.getByLabelText('Scroll send config up'));
+    expect(configPanel.scrollTop).toBe(0);
+
+    const tempInput = screen.getByLabelText('Chat temperature') as HTMLInputElement;
+    fireEvent.change(tempInput, { target: { value: '0.35' } });
+    expect(tempInput.value).toBe('0.35');
+    expect(screen.getByLabelText('Chat target system override')).toBeInTheDocument();
+  });
+
+  it('opens Chat via Enter from Responses and Waterfall, omits unchecked params, and includes + Add Param values', async () => {
+    const sentPayloads: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      if (init?.body && typeof init.body === 'string') {
+        sentPayloads.push(JSON.parse(init.body) as Record<string, unknown>);
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: 'Follow-up answer from model' } }],
+          usage: { prompt_tokens: 15, completion_tokens: 8, total_tokens: 23 },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<App />);
+
+    // Enter from Waterfall opens Chat with selected row
+    const waterfallBtn = screen.getByRole('button', { name: 'Waterfall' });
+    fireEvent.click(waterfallBtn);
+    const waterfallRow = screen.getByText('gemini-4-hydrogen').closest('tr');
+    expect(waterfallRow).toBeTruthy();
+    if (waterfallRow) {
+      fireEvent.keyDown(waterfallRow, { key: 'Enter' });
+    }
+    expect(screen.getByTestId('chat-view')).toBeInTheDocument();
+
+    // Verify ResultCard Enter shortcut as well
+    fireEvent.click(screen.getByRole('button', { name: 'Responses' }));
+    const firstCard = screen.getByText('gemini-4-hydrogen').closest('article');
+    expect(firstCard).toBeTruthy();
+    if (firstCard) {
+      fireEvent.keyDown(firstCard, { key: 'Enter' });
+    }
+    expect(screen.getByTestId('chat-view')).toBeInTheDocument();
+
+    // Uncheck Temperature and Max Tokens activation checkboxes so they are omitted when sending
+    const tempCheckbox = screen.getByLabelText('Activate Temperature param') as HTMLInputElement;
+    expect(tempCheckbox.checked).toBe(true);
+    fireEvent.click(tempCheckbox);
+    expect(tempCheckbox.checked).toBe(false);
+
+    const maxTokCheckbox = screen.getByLabelText('Activate Max Tokens param') as HTMLInputElement;
+    fireEvent.click(maxTokCheckbox);
+    expect(maxTokCheckbox.checked).toBe(false);
+
+    // Add two custom parameters via + Add Param controls; uncheck one
+    fireEvent.change(screen.getByLabelText('New param key'), { target: { value: 'presence_penalty' } });
+    fireEvent.change(screen.getByLabelText('New param value'), { target: { value: '0.25' } });
+    fireEvent.click(screen.getByLabelText('Submit add param'));
+    expect(screen.getByLabelText('Activate param presence_penalty')).toBeChecked();
+
+    fireEvent.change(screen.getByLabelText('New param key'), { target: { value: 'disabled_key' } });
+    fireEvent.change(screen.getByLabelText('New param value'), { target: { value: '99' } });
+    fireEvent.click(screen.getByLabelText('+ Add Param'));
+    const disabledCheck = screen.getByLabelText('Activate param disabled_key') as HTMLInputElement;
+    fireEvent.click(disabledCheck);
+    expect(disabledCheck.checked).toBe(false);
+
+    // Send a follow-up turn using Send Config
+    const streamToggle = screen.getByLabelText('Chat SSE stream') as HTMLInputElement;
+    if (streamToggle.checked) {
+      fireEvent.click(streamToggle);
+    }
+    const composer = screen.getByLabelText('Chat follow-up message');
+    fireEvent.change(composer, { target: { value: 'Now summarize in 1 sentence.' } });
+    fireEvent.keyDown(composer, { key: 'Enter' });
+
+    await screen.findByText('Follow-up answer from model');
+    expect(fetchMock).toHaveBeenCalled();
+    const lastPayload = sentPayloads[sentPayloads.length - 1];
+    expect(lastPayload.temperature).toBeUndefined();
+    expect(lastPayload.maxTokens).toBeUndefined();
+    expect(lastPayload.max_tokens).toBeUndefined();
+    expect(lastPayload.presence_penalty).toBe(0.25);
+    expect(lastPayload.disabled_key).toBeUndefined();
+
+    // Also verify runExecutionPool proxy routing omits unchecked params and passes extraParams
+    await runExecutionPool({
+      targets: [
+        {
+          id: 't-proxy',
+          providerId: 'p-proxy',
+          providerName: 'Proxy Provider',
+          providerKind: 'openai',
+          modelName: 'gpt-4o-mini',
+          enabled: true,
+        },
+      ],
+      providers: [
+        {
+          id: 'p-proxy',
+          name: 'Proxy Provider',
+          kind: 'openai',
+          baseUrl: 'https://api.example.com/v1',
+          apiKey: 'sk-proxy',
+          customHeaders: { 'X-Ignored': '1' },
+          directBrowser: false,
+          models: ['gpt-4o-mini'],
+        },
+      ],
+      prompt: 'hi',
+      systemPrompt: { enabled: false, content: '', personaId: null, targetMode: 'all', targetModelIds: [] },
+      executionConfig: {
+        mode: 'parallel',
+        concurrency: 1,
+        timeoutSec: 30,
+        stream: false,
+        temperature: 0.7,
+        maxTokens: 256,
+        topP: 0.9,
+        seed: 42,
+        activeParams: {
+          customHeaders: false,
+          temperature: false,
+          topP: false,
+          maxTokens: false,
+          seed: false,
+        },
+        extraParams: [
+          { id: 'e1', key: 'presence_penalty', value: '0.25', enabled: true },
+          { id: 'e2', key: 'stop', value: '["END"]', enabled: true },
+          { id: 'e3', key: 'off_param', value: '123', enabled: false },
+        ],
+      },
+      signal: new AbortController().signal,
+      onResultUpdate: () => {},
+    });
+
+    const proxyPayload = sentPayloads[sentPayloads.length - 1];
+    expect(proxyPayload.headers).toEqual({});
+    expect(proxyPayload.temperature).toBeUndefined();
+    expect(proxyPayload.topP).toBeUndefined();
+    expect(proxyPayload.maxTokens).toBeUndefined();
+    expect(proxyPayload.seed).toBeUndefined();
+    expect(proxyPayload.extraParams).toEqual({ presence_penalty: 0.25, stop: ['END'] });
+
+    vi.unstubAllGlobals();
+  });
 });
+

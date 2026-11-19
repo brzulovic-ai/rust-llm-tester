@@ -8,6 +8,7 @@ import {
   FileText,
   Globe,
   Loader2,
+  MessageSquare,
   RotateCcw,
   Volume2,
 } from 'lucide-react';
@@ -21,9 +22,18 @@ type CardOutputTab = 'formatted' | 'raw' | 'html' | 'audio';
 interface ResultCardProps {
   result: ModelRunResult;
   onRetry: (targetId: string) => void;
+  isSelected?: boolean;
+  onSelect?: (targetId: string) => void;
+  onOpenChat?: (result: ModelRunResult) => void;
 }
 
-export const ResultCard: React.FC<ResultCardProps> = ({ result, onRetry }) => {
+export const ResultCard: React.FC<ResultCardProps> = ({
+  result,
+  onRetry,
+  isSelected = false,
+  onSelect,
+  onOpenChat,
+}) => {
   const [activeTab, setActiveTab] = useState<CardOutputTab>('formatted');
   const [copied, setCopied] = useState(false);
 
@@ -65,9 +75,21 @@ export const ResultCard: React.FC<ResultCardProps> = ({ result, onRetry }) => {
 
   return (
     <article
-      className="rounded-xl border flex flex-col overflow-hidden"
+      tabIndex={0}
+      aria-selected={isSelected}
+      onClick={() => onSelect?.(result.targetId)}
+      onFocus={() => onSelect?.(result.targetId)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' && onOpenChat) {
+          const tag = (e.target as HTMLElement | null)?.tagName;
+          if (tag === 'BUTTON' || tag === 'A' || tag === 'INPUT' || tag === 'TEXTAREA') return;
+          e.preventDefault();
+          onOpenChat(result);
+        }
+      }}
+      className="rounded-xl border flex flex-col overflow-hidden focus:outline-none focus-visible:ring-2"
       style={{
-        borderColor: 'var(--border-subtle)',
+        borderColor: isSelected ? 'var(--accent-primary)' : 'var(--border-subtle)',
         backgroundColor: 'var(--bg-surface)',
       }}
     >
@@ -145,6 +167,26 @@ export const ResultCard: React.FC<ResultCardProps> = ({ result, onRetry }) => {
 
         {/* Actions */}
         <div className="flex items-center gap-1.5 shrink-0">
+          {onOpenChat && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onSelect?.(result.targetId);
+                onOpenChat(result);
+              }}
+              title="Open response & editable Send Config in Chat (Enter)"
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border text-xs transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              style={{
+                borderColor: 'var(--border-subtle)',
+                color: 'var(--accent-primary)',
+                backgroundColor: 'var(--bg-elevated)',
+              }}
+            >
+              <MessageSquare className="w-3.5 h-3.5" />
+              <span>Chat</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={handleCopy}

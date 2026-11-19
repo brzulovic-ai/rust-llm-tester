@@ -1,7 +1,10 @@
-use crate::app::{ActiveTab, AppState, ConfigFocus, UiLayoutZones, WaterfallSortField, TAB_TITLES};
+use crate::app::{
+    ActiveTab, AppState, ChatConfigRow, ChatFocus, ConfigFocus, UiLayoutZones,
+    WaterfallSortField, TAB_TITLES,
+};
 use crate::config::{ExecutionMode, ThemeId};
 use crate::diff::{compute_token_diff, DiffOp};
-use crate::engine::{RunStatus, StatusCategory};
+use crate::engine::{resolve_system_prompt, RunStatus, StatusCategory};
 use crate::suites::{lookup_persona, PROMPT_SUITES};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -105,6 +108,7 @@ pub fn draw(frame: &mut Frame, app: &mut AppState) {
         ActiveTab::DiffCompare => draw_diff_tab(frame, app, &pal, chunks[1]),
         ActiveTab::CapabilityGraph => draw_graph_tab(frame, app, &pal, chunks[1]),
         ActiveTab::ConfigEditor => draw_config_tab(frame, app, &pal, chunks[1]),
+        ActiveTab::Chat => draw_chat_tab(frame, app, &pal, chunks[1]),
     }
 
     draw_footer(frame, app, &pal, chunks[2]);
@@ -142,9 +146,9 @@ fn draw_header(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette, area: 
 fn draw_footer(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect) {
     let key_hints = match app.active_tab {
         ActiveTab::PromptSuites if app.editing_prompt => "EDIT MODE: Type prompt · Esc or Click Outside Exit Edit",
-        ActiveTab::PromptSuites => "↑/↓/Click Preview Suite · Enter/2xClick Load · i Edit · r Run · t Theme · q Quit",
-        ActiveTab::Responses => "↑/↓/Click Target · Wheel/PgUp/PgDn (J/K) Scroll Output · r Run · R Retry · x Abort",
-        ActiveTab::Waterfall => "Enter/Space/2xClick Open Response · Click Header or o/←/→ Sort · O/v Asc/Desc · Wheel/↑/↓ Scroll · r Run",
+        ActiveTab::PromptSuites => "↑/↓/Click Preview · Enter Open 7:Chat · 2xClick Load · i Edit · r Run · t Theme · q Quit",
+        ActiveTab::Responses => "↑/↓/Click Target · Enter Open 7:Chat · Shift+↑/↓ / Wheel / PgUp/PgDn Scroll · r Run · R Retry",
+        ActiveTab::Waterfall => "Enter 7:Chat · Space/2xClick Open Response · Click Header or o/←/→ Sort · O/v Order · Wheel/↑/↓",
         ActiveTab::ConfigEditor if app.editing_subgroup_name => {
             "SUBGROUP NAME: Type name (or Enter for filter name) · Ctrl+U Clear · Enter Save TOML · Esc Cancel"
         }
@@ -156,15 +160,37 @@ fn draw_footer(frame: &mut Frame, app: &AppState, pal: &ThemePalette, area: Rect
         }
         ActiveTab::ConfigEditor => "Click/Shift+Tab Panes · / Filter · g Save Subgroup · N Random · L Import JSON · s Save",
         ActiveTab::DiffCompare => "a / Click Left Baseline · b / Click Right Candidate · r Run · e Export · L Import · q Quit",
-        _ => "Click/1-6 Tabs · Mouse Wheel Scroll · r Run · R Retry · x Abort · s Save Config · e Export · L Import · q Quit",
+        ActiveTab::Chat if app.chat_adding_param => {
+            "ADD PARAM: Type key=value (e.g. presence_penalty=0.2) · Ctrl+U Clear · Enter Add · Esc Cancel"
+        }
+        ActiveTab::Chat if app.chat_editing_param => {
+            "EDIT PARAM: Type value · Ctrl+U Clear · Enter Apply · Esc Cancel"
+        }
+        ActiveTab::Chat if app.chat_editing_composer => {
+            "COMPOSER: Type message · Shift+Enter Newline · Shift+↑/↓ Scroll · Enter Send · Esc Exit"
+        }
+        ActiveTab::Chat if app.chat_focus == ChatFocus::Params => {
+            "7:CHAT PARAMS: Space/[x] Activate · a/+ +Add Param · Del Remove · ←/→ Step · Enter/e Edit · i Type · r Send"
+        }
+        ActiveTab::Chat => {
+            "7:CHAT TRANSCRIPT: ↑/↓/Shift+↑/↓/Wheel Scroll · Shift+Tab Focus · i Type · r Send · c Reset · x Abort"
+        }
+        _ => "Click/1-7 Tabs · Mouse Wheel Scroll · r Run · R Retry · x Abort · s Save Config · e Export · L Import · q Quit",
     };
 
+    let is_busy = app.is_running || app.chat_running;
     let footer = Paragraph::new(vec![
         Line::from(vec![
             Span::styled(
-                if app.is_running { "[RUNNING] " } else { "[READY] " },
+                if app.chat_running {
+                    "[CHAT] "
+                } else if app.is_running {
+                    "[RUNNING] "
+                } else {
+                    "[READY] "
+                },
                 Style::default()
-                    .fg(if app.is_running { pal.warning } else { pal.success })
+                    .fg(if is_busy { pal.warning } else { pal.success })
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(&app.status_message, Style::default().fg(pal.text)),
@@ -693,12 +719,15 @@ fn draw_config_tab(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette, ar
         Style::default().fg(pal.muted),
     )));
 
-    let settings_panel = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Execution & Provider Configuration ")
-            .style(Style::default().bg(pal.surface).fg(pal.text)),
-    );
+    let settings_panel = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((app.config_settings_scroll, 0))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Execution & Provider Configuration (Wheel: Scroll) ")
+                .style(Style::default().bg(pal.surface).fg(pal.text)),
+        );
     frame.render_widget(settings_panel, cols[0]);
     app.layout_zones.config_settings_area = cols[0];
 
@@ -959,3 +988,468 @@ fn draw_config_tab(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette, ar
         app.layout_zones.config_subgroups_offset = subgroups_state.offset();
     }
 }
+
+fn draw_chat_tab(frame: &mut Frame, app: &mut AppState, pal: &ThemePalette, area: Rect) {
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .split(area);
+
+    // Left: All Editable Send Parameters from Config (scrollable) + Inline Param Inspector/Editor
+    let left_panes = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(10), Constraint::Length(5)])
+        .split(cols[0]);
+
+    let params_focused =
+        app.chat_focus == ChatFocus::Params || app.chat_editing_param || app.chat_adding_param;
+    let rows = app.chat_config_rows();
+    let total_params = rows.len();
+    let sel_idx = app
+        .chat_selected_param_idx
+        .min(total_params.saturating_sub(1));
+    let selected_row = rows[sel_idx];
+
+    let param_items: Vec<ListItem> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let sel = i == sel_idx;
+            match row {
+                ChatConfigRow::Builtin(field) => {
+                    let act_opt = app.is_chat_field_activated(*field);
+                    let checkbox = match act_opt {
+                        Some(true) => "[x] ",
+                        Some(false) => "[ ] ",
+                        None => "    ",
+                    };
+                    let inactive = act_opt == Some(false);
+                    let val = if inactive {
+                        format!("{} (off)", app.chat_param_display_value(*field))
+                    } else {
+                        app.chat_param_display_value(*field)
+                    };
+                    let label_style = if sel {
+                        Style::default()
+                            .fg(pal.accent)
+                            .add_modifier(Modifier::BOLD)
+                    } else if inactive {
+                        Style::default().fg(pal.muted)
+                    } else {
+                        Style::default().fg(pal.muted)
+                    };
+                    let check_style = match act_opt {
+                        Some(true) => Style::default().fg(pal.success).add_modifier(Modifier::BOLD),
+                        Some(false) => Style::default().fg(pal.muted),
+                        None => Style::default().fg(pal.muted),
+                    };
+                    let value_style = if sel {
+                        Style::default()
+                            .fg(if inactive { pal.muted } else { pal.text })
+                            .add_modifier(Modifier::BOLD)
+                    } else if inactive {
+                        Style::default().fg(pal.muted)
+                    } else {
+                        Style::default().fg(pal.text)
+                    };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(if sel { "> " } else { "  " }, label_style),
+                        Span::styled(checkbox, check_style),
+                        Span::styled(format!("{}: ", field.label()), label_style),
+                        Span::styled(val, value_style),
+                    ]))
+                }
+                ChatConfigRow::Custom(ci) => {
+                    let p = &app.config.execution.extra_params[*ci];
+                    let checkbox = if p.enabled { "[x] " } else { "[ ] " };
+                    let val = if p.enabled {
+                        p.value.clone()
+                    } else {
+                        format!("{} (off)", p.value)
+                    };
+                    let check_style = if p.enabled {
+                        Style::default().fg(pal.success).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(pal.muted)
+                    };
+                    let key_style = if sel {
+                        Style::default()
+                            .fg(pal.accent)
+                            .add_modifier(Modifier::BOLD)
+                    } else if p.enabled {
+                        Style::default().fg(pal.warning)
+                    } else {
+                        Style::default().fg(pal.muted)
+                    };
+                    let val_style = if p.enabled {
+                        Style::default().fg(pal.text)
+                    } else {
+                        Style::default().fg(pal.muted)
+                    };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(if sel { "> " } else { "  " }, key_style),
+                        Span::styled(checkbox, check_style),
+                        Span::styled(format!("{}: ", p.key), key_style),
+                        Span::styled(val, val_style),
+                    ]))
+                }
+                ChatConfigRow::AddParam => {
+                    let style = if sel {
+                        Style::default()
+                            .fg(pal.accent)
+                            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                    } else {
+                        Style::default()
+                            .fg(pal.accent)
+                            .add_modifier(Modifier::BOLD)
+                    };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(if sel { "> " } else { "  " }, style),
+                        Span::styled("[ + Add Param ] (press 'a', '+' or Enter)", style),
+                    ]))
+                }
+            }
+        })
+        .collect();
+
+    let params_title = format!(
+        " Editable Send Config ({}/{} · Space: [x] Activate · a/+: +Add Param) ",
+        sel_idx + 1,
+        total_params
+    );
+    let params_list = List::new(param_items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(params_title)
+            .border_style(Style::default().fg(if params_focused { pal.accent } else { pal.muted }))
+            .style(Style::default().bg(pal.surface).fg(pal.text)),
+    );
+    let mut params_state = ListState::default().with_selected(Some(sel_idx));
+    frame.render_stateful_widget(params_list, left_panes[0], &mut params_state);
+    app.layout_zones.chat_params_area = left_panes[0];
+    app.layout_zones.chat_params_offset = params_state.offset();
+
+    let inspector_lines = if app.chat_adding_param {
+        vec![
+            Line::from(vec![
+                Span::styled(
+                    "New Param (key=value) > ",
+                    Style::default()
+                        .fg(pal.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(app.chat_param_input.as_str(), Style::default().fg(pal.text)),
+                Span::styled(
+                    "_",
+                    Style::default()
+                        .fg(pal.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(Span::styled(
+                "Examples: presence_penalty=0.2 · stop=[\"END\"] · top_k=40",
+                Style::default().fg(pal.muted),
+            )),
+        ]
+    } else if app.chat_editing_param {
+        let edit_label = match selected_row {
+            ChatConfigRow::Builtin(f) => f.label().to_string(),
+            ChatConfigRow::Custom(ci) => app
+                .config
+                .execution
+                .extra_params
+                .get(ci)
+                .map(|p| p.key.clone())
+                .unwrap_or_else(|| "Custom Param".to_string()),
+            ChatConfigRow::AddParam => "+ Add Param".to_string(),
+        };
+        let edit_hint = match selected_row {
+            ChatConfigRow::Builtin(f) => f.hint(),
+            ChatConfigRow::Custom(_) => "Edit key=value or raw value, Enter apply, Esc cancel",
+            ChatConfigRow::AddParam => "Enter key=value to append custom JSON body param",
+        };
+        vec![
+            Line::from(vec![
+                Span::styled(
+                    format!("{} > ", edit_label),
+                    Style::default()
+                        .fg(pal.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(app.chat_param_input.as_str(), Style::default().fg(pal.text)),
+                Span::styled(
+                    "_",
+                    Style::default()
+                        .fg(pal.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(Span::styled(edit_hint, Style::default().fg(pal.muted))),
+        ]
+    } else {
+        match selected_row {
+            ChatConfigRow::Builtin(field) => {
+                let status_tag = match app.is_chat_field_activated(field) {
+                    Some(true) => " [ACTIVE]",
+                    Some(false) => " [INACTIVE - OMITTED]",
+                    None => "",
+                };
+                vec![
+                    Line::from(vec![
+                        Span::styled(
+                            format!("{}{}: ", field.label(), status_tag),
+                            Style::default()
+                                .fg(pal.accent)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            app.chat_param_display_value(field),
+                            Style::default().fg(pal.text),
+                        ),
+                    ]),
+                    Line::from(Span::styled(
+                        format!("{} (Space toggles [x]/[ ] · a/+ adds param)", field.hint()),
+                        Style::default().fg(pal.muted),
+                    )),
+                ]
+            }
+            ChatConfigRow::Custom(ci) => {
+                if let Some(p) = app.config.execution.extra_params.get(ci) {
+                    vec![
+                        Line::from(vec![
+                            Span::styled(
+                                format!(
+                                    "{} {}: ",
+                                    if p.enabled { "[ACTIVE]" } else { "[INACTIVE]" },
+                                    p.key
+                                ),
+                                Style::default()
+                                    .fg(pal.accent)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(p.value.as_str(), Style::default().fg(pal.text)),
+                        ]),
+                        Line::from(Span::styled(
+                            "Space/[x] toggle · Enter/e edit key=value · Del remove · a/+ add new",
+                            Style::default().fg(pal.muted),
+                        )),
+                    ]
+                } else {
+                    vec![Line::from(Span::styled(
+                        "Custom parameter slot",
+                        Style::default().fg(pal.muted),
+                    ))]
+                }
+            }
+            ChatConfigRow::AddParam => vec![
+                Line::from(Span::styled(
+                    "+ Add Param (JSON body field)",
+                    Style::default()
+                        .fg(pal.accent)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    "Press Enter, Space, a, or + to add key=value (numbers, booleans, JSON arrays/objects)",
+                    Style::default().fg(pal.muted),
+                )),
+            ],
+        }
+    };
+    let inspector_title = if app.chat_adding_param {
+        " Adding Custom Param (Enter: Add · Esc: Cancel) ".to_string()
+    } else if app.chat_editing_param {
+        " Editing Parameter (Enter: Apply · Esc: Cancel) ".to_string()
+    } else {
+        " Parameter Detail & Activation (Space: [x] · a/+: +Add Param) ".to_string()
+    };
+    let inspector = Paragraph::new(inspector_lines)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(inspector_title)
+                .border_style(Style::default().fg(if app.chat_editing_param || app.chat_adding_param {
+                    pal.accent
+                } else {
+                    pal.muted
+                }))
+                .style(Style::default().bg(pal.surface).fg(pal.text)),
+        );
+    frame.render_widget(inspector, left_panes[1]);
+
+    // Right: Scrollable Chat Transcript + Composer
+    let right_panes = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(8), Constraint::Length(5)])
+        .split(cols[1]);
+
+    let target_opt = app.active_chat_target().cloned();
+    let provider_name = target_opt
+        .as_ref()
+        .and_then(|t| app.config.find_provider(&t.provider_id))
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| "none".to_string());
+    let model_label = target_opt
+        .as_ref()
+        .map(|t| t.model.clone())
+        .unwrap_or_else(|| "<no target>".to_string());
+
+    let mut transcript_lines: Vec<Line> = Vec::new();
+    if let Some(ref target) = target_opt {
+        if let Some(sys_text) = resolve_system_prompt(target, &app.config) {
+            transcript_lines.push(Line::from(Span::styled(
+                "[SYSTEM]",
+                Style::default()
+                    .fg(pal.warning)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            for line in sys_text.lines() {
+                transcript_lines.push(Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(pal.muted),
+                )));
+            }
+            transcript_lines.push(Line::from(""));
+        }
+    }
+
+    if app.chat_messages.is_empty() {
+        transcript_lines.push(Line::from(Span::styled(
+            "No chat messages yet. Press Enter from 1:Prompt, 2:Responses, or 3:Waterfall, or press 'i' below to compose a message.",
+            Style::default().fg(pal.muted),
+        )));
+    } else {
+        for (idx, msg) in app.chat_messages.iter().enumerate() {
+            let is_user = msg.role.eq_ignore_ascii_case("user");
+            let is_assistant = msg.role.eq_ignore_ascii_case("assistant");
+            let is_last_with_err = idx + 1 == app.chat_messages.len()
+                && app
+                    .chat_last_result
+                    .as_ref()
+                    .and_then(|r| r.error.as_ref())
+                    .is_some();
+            let role_header = if is_user {
+                "[USER]".to_string()
+            } else if is_assistant {
+                format!("[ASSISTANT · {}]", model_label)
+            } else {
+                format!("[{}]", msg.role.to_uppercase())
+            };
+            let role_style = if is_user {
+                Style::default()
+                    .fg(pal.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else if is_last_with_err {
+                Style::default()
+                    .fg(pal.error)
+                    .add_modifier(Modifier::BOLD)
+            } else if is_assistant {
+                Style::default()
+                    .fg(pal.success)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(pal.warning)
+                    .add_modifier(Modifier::BOLD)
+            };
+
+            transcript_lines.push(Line::from(Span::styled(role_header, role_style)));
+            if msg.content.is_empty() {
+                transcript_lines.push(Line::from(Span::styled(
+                    "...",
+                    Style::default().fg(pal.muted),
+                )));
+            } else {
+                for raw_line in msg.content.lines() {
+                    transcript_lines.push(Line::from(Span::styled(
+                        raw_line.to_string(),
+                        Style::default().fg(pal.text),
+                    )));
+                }
+            }
+            transcript_lines.push(Line::from(""));
+        }
+    }
+
+    let metrics_suffix = if let Some(ref res) = app.chat_last_result {
+        let (_, code_label) = res.classify_status();
+        let ttfb = res
+            .timing
+            .ttfb_ms
+            .map(|v| format!("{:.0}ms", v))
+            .unwrap_or_else(|| "-".to_string());
+        format!(
+            " [{}] · TTFB {} · {:.1} t/s · {:.0}ms",
+            code_label, ttfb, res.tokens_per_sec, res.timing.total_ms
+        )
+    } else {
+        String::new()
+    };
+    let streaming_tag = if app.chat_running { " [STREAMING]" } else { "" };
+    let transcript_title = format!(
+        " Chat · {} ({}){}{} · ↑/↓ Scroll ",
+        model_label, provider_name, metrics_suffix, streaming_tag
+    );
+
+    let messages_focused = app.chat_focus == ChatFocus::Messages;
+    let transcript = Paragraph::new(transcript_lines)
+        .wrap(Wrap { trim: false })
+        .scroll((app.chat_scroll, 0))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(transcript_title)
+                .border_style(Style::default().fg(if messages_focused {
+                    pal.accent
+                } else {
+                    pal.muted
+                }))
+                .style(Style::default().bg(pal.surface).fg(pal.text)),
+        );
+    frame.render_widget(transcript, right_panes[0]);
+    app.layout_zones.chat_messages_area = right_panes[0];
+
+    let composer_focused = app.chat_focus == ChatFocus::Composer || app.chat_editing_composer;
+    let composer_title = if app.chat_editing_composer {
+        " Composer [TYPING] (Enter: Send · Shift+Enter: Newline · Esc: Exit) "
+    } else {
+        " Composer (i / Click to Type · r: Send / Resend · c: Reset) "
+    };
+    let composer_line = if app.chat_editing_composer {
+        Line::from(vec![
+            Span::styled(app.chat_input.as_str(), Style::default().fg(pal.text)),
+            Span::styled(
+                "_",
+                Style::default()
+                    .fg(pal.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
+    } else if app.chat_input.is_empty() {
+        Line::from(Span::styled(
+            "Press 'i' (or click) to type a reply, or press 'r' to send/resend with edited Send Config...",
+            Style::default().fg(pal.muted),
+        ))
+    } else {
+        Line::from(Span::styled(
+            app.chat_input.as_str(),
+            Style::default().fg(pal.text),
+        ))
+    };
+    let composer = Paragraph::new(composer_line)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(composer_title)
+                .border_style(Style::default().fg(if composer_focused {
+                    pal.accent
+                } else {
+                    pal.muted
+                }))
+                .style(Style::default().bg(pal.surface).fg(pal.text)),
+        );
+    frame.render_widget(composer, right_panes[1]);
+    app.layout_zones.chat_composer_area = right_panes[1];
+}
+
